@@ -46,12 +46,20 @@ def _is_freefall(env: ManagerBasedRLEnv) -> torch.Tensor:
 def _get_ed(env: ManagerBasedRLEnv, k: int = 3) -> torch.Tensor:
     """Episode-based Dynamic factor — only active during recovery phase.
 
+    Also increments step counter (no separate counter function needed).
     Steps 0-99: returns 0 (free-fall)
-    Steps 100-249: ed = (75 * (t-100) / 150)^3, grows from 0 to ~75^3
-    Normalized so ed ∈ [0, 1] at step 249.
+    Steps 100-249: ed normalized 0→1
     """
     if not hasattr(env, "_recovery_step_count"):
         env._recovery_step_count = torch.zeros(env.num_envs, device=env.device)
+    if not hasattr(env, "_recovery_ed_last_step"):
+        env._recovery_ed_last_step = -1
+
+    # Increment counter once per sim step (avoid double-counting from multiple reward calls)
+    current_step = env.common_step_counter if hasattr(env, "common_step_counter") else 0
+    if current_step != env._recovery_ed_last_step:
+        env._recovery_step_count += 1
+        env._recovery_ed_last_step = current_step
 
     t = env._recovery_step_count
     t_recovery = (t - FREEFALL_STEPS).clamp(min=0)  # 0 during free-fall
@@ -120,13 +128,18 @@ def recovery_base_orientation(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Penalize deviation from upright. Paper scale=50 (use negative weight)."""
+    """Reward for upright orientation. Paper scale=50.
+
+    reward = ED * exp(-||g_body - [0,0,-1]||^2)
+    Upright → error=0 → reward=1. Fallen → error~4 → reward≈0.
+    """
     if not hasattr(env, "_recovery_step_count"):
         return torch.zeros(env.num_envs, device=env.device)
     asset: Articulation = env.scene[asset_cfg.name]
     ideal = torch.tensor([0.0, 0.0, -1.0], device=env.device)
     error = torch.sum(torch.square(asset.data.projected_gravity_b - ideal), dim=1)
-    return _get_ed(env) * error
+    reward = torch.exp(-error)
+    return _get_ed(env) * reward
 
 
 # ── Behavior Rewards (×CW, zero during free-fall) ──

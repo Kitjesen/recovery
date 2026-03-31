@@ -35,10 +35,10 @@ class RecoveryRewardsCfg:
     Just set weights here, env handles the rest.
     """
 
-    # Step counter (weight=0, just keeps ED counter in sync)
+    # Step counter (tiny weight — must be called every step for ED counter)
     recovery_step_counter = RewTerm(
         func=mdp.recovery_step_counter,
-        weight=0.0,
+        weight=1e-10,
     )
 
     # ── Task rewards (ED built-in) ──
@@ -54,7 +54,7 @@ class RecoveryRewardsCfg:
     )
     recovery_base_orientation = RewTerm(
         func=mdp.recovery_base_orientation,
-        weight=-50.0,  # negative: orientation error is a penalty
+        weight=50.0,   # positive: reward for being upright
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
