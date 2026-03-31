@@ -50,7 +50,7 @@ class RecoveryRewardsCfg:
     recovery_base_height = RewTerm(
         func=mdp.recovery_base_height,
         weight=120.0,
-        params={"target_height": 0.55, "sigma": 0.1, "asset_cfg": SceneEntityCfg("robot")},
+        params={"target_height": 0.388, "sigma": 0.1, "asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_base_orientation = RewTerm(
         func=mdp.recovery_base_orientation,
