@@ -1,15 +1,18 @@
 # Copyright (c) 2026 Qiongpei Technology
 # SPDX-License-Identifier: Apache-2.0
 
-"""Recovery reward functions based on 'Learning to Recover' (arXiv:2506.05516).
+"""Recovery reward functions — Isaac Lab RewardTermCfg compatible.
 
-Key mechanism: Episode-based Dynamic Reward Shaping (ED)
-- Episode start: ed ≈ 0 → task rewards suppressed → free exploration of recovery strategies
-- Episode end: ed → 1 → full task reward → precise standing convergence
+All functions: func(env, **params) -> Tensor(N,)
+ED shaping is built into each task reward via env step counter.
+Just register with RewardTermCfg in recovery_env_cfg.py, no runner changes needed.
+
+Based on 'Learning to Recover' (arXiv:2506.05516) Table I.
 """
 
 from __future__ import annotations
 
+import math
 import torch
 from typing import TYPE_CHECKING
 
@@ -21,36 +24,40 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-def compute_ed(step: int, total_steps: int, k: int = 3) -> float:
-    """Episode-based Dynamic factor (Eq.1 in paper).
+# ── ED / CW helpers ──
 
-    Args:
-        step: Current step in the episode.
-        total_steps: Total steps per episode (T).
-        k: Growth rate exponent. Paper uses k=3.
+def _get_ed(env: ManagerBasedRLEnv, k: int = 3) -> torch.Tensor:
+    """Episode-based Dynamic factor (Eq.1). Stored on env for reuse."""
+    if not hasattr(env, "_recovery_step_count"):
+        env._recovery_step_count = torch.zeros(env.num_envs, device=env.device)
+        env._recovery_episode_steps = env.max_episode_length
 
-    Returns:
-        ED factor in [0, 1]. Near 0 at start, near 1 at end.
-    """
-    T = total_steps
+    T = env._recovery_episode_steps
     a = T / 2.0
-    ed = (a * step / T) ** k
+    t = env._recovery_step_count.clamp(max=T)
+    ed = (a * t / T) ** k
     return ed
 
 
-def compute_cw(progress: float, beta: float = 0.3, decay: float = 0.968) -> float:
-    """Curriculum Weight for behavior rewards (Eq.3 in paper).
+def _get_cw(env: ManagerBasedRLEnv, beta: float = 0.3, decay: float = 0.968) -> float:
+    """Curriculum Weight (Eq.3). Decays over training."""
+    if hasattr(env, "common_step_counter"):
+        progress = env.common_step_counter / (env.max_episode_length * 5000)
+    else:
+        progress = 0.0
+    return beta * (decay ** (progress * 10000))
 
-    Args:
-        progress: Training progress in [0, 1].
-        beta: Initial difficulty factor.
-        decay: Decay rate per 10000 iterations.
 
-    Returns:
-        CW factor that decays over training.
-    """
-    cw = beta * (decay ** (progress * 10000))
-    return cw
+def recovery_step_counter(
+    env: ManagerBasedRLEnv,
+) -> torch.Tensor:
+    """Increment ED step counter each step. Register as a reward with weight=0.
+    Must be called every step to keep ED counter in sync."""
+    if not hasattr(env, "_recovery_step_count"):
+        env._recovery_step_count = torch.zeros(env.num_envs, device=env.device)
+        env._recovery_episode_steps = env.max_episode_length
+    env._recovery_step_count += 1
+    return torch.zeros(env.num_envs, device=env.device)
 
 
 # ── Task Rewards (multiplied by ED) ──
@@ -60,15 +67,11 @@ def recovery_stand_joint_pos(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     sigma: float = 0.5,
 ) -> torch.Tensor:
-    """Reward for returning joints to default standing position (Table I, scale=42).
-
-    exp(-sum(q_j - q_default)^2 / sigma^2)
-    """
+    """Joints return to default angles. Paper scale=42."""
     asset: Articulation = env.scene[asset_cfg.name]
-    joint_pos = asset.data.joint_pos
-    default_pos = asset.data.default_joint_pos
-    error = torch.sum(torch.square(joint_pos - default_pos), dim=1)
-    return torch.exp(-error / (sigma ** 2))
+    error = torch.sum(torch.square(asset.data.joint_pos - asset.data.default_joint_pos), dim=1)
+    reward = torch.exp(-error / (sigma ** 2))
+    return _get_ed(env) * reward
 
 
 def recovery_base_height(
@@ -77,70 +80,54 @@ def recovery_base_height(
     sigma: float = 0.1,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Reward for reaching target standing height (Table I, scale=120).
-
-    exp(-max(h_target - h, 0)^2 / sigma^2)
-    One-sided: no penalty for being above target.
-    """
+    """Body reaches target height. Paper scale=120. One-sided (no penalty above target)."""
     asset: Articulation = env.scene[asset_cfg.name]
-    base_height = asset.data.root_pos_w[:, 2]
-    height_error = torch.clamp(target_height - base_height, min=0.0)
-    return torch.exp(-torch.square(height_error) / (sigma ** 2))
+    height_error = torch.clamp(target_height - asset.data.root_pos_w[:, 2], min=0.0)
+    reward = torch.exp(-torch.square(height_error) / (sigma ** 2))
+    return _get_ed(env) * reward
 
 
 def recovery_base_orientation(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Reward for upright orientation (Table I, scale=50).
-
-    (g_body - [0, 0, -1])^2 — penalizes deviation from upright.
-    Returns NEGATIVE value (this is a penalty).
-    """
+    """Penalize deviation from upright. Paper scale=50 (use negative weight)."""
     asset: Articulation = env.scene[asset_cfg.name]
-    gravity_b = asset.data.projected_gravity_b  # (N, 3)
-    # Ideal upright: gravity in body frame = [0, 0, -1]
-    ideal = torch.tensor([0.0, 0.0, -1.0], device=gravity_b.device)
-    error = torch.sum(torch.square(gravity_b - ideal), dim=1)
-    return error
+    ideal = torch.tensor([0.0, 0.0, -1.0], device=env.device)
+    error = torch.sum(torch.square(asset.data.projected_gravity_b - ideal), dim=1)
+    return _get_ed(env) * error
 
 
-# ── Behavior Rewards (some multiplied by CW) ──
+# ── Behavior Rewards (multiplied by CW) ──
 
 def recovery_body_collision(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
 ) -> torch.Tensor:
-    """Penalty for body link collisions (Table I, scale=-5e-2).
-
-    Sum of squared contact forces on thigh/shank/base links.
-    """
+    """Body collision penalty. Paper scale=-5e-2."""
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    net_forces = contact_sensor.data.net_forces_w_history
-    # Sum squared forces across all tracked body links
-    return torch.sum(torch.square(net_forces[:, :, :2].sum(dim=1)), dim=1)
+    forces = contact_sensor.data.net_forces_w_history[:, 0, :]
+    penalty = torch.sum(torch.square(forces), dim=1)
+    return _get_cw(env) * penalty
 
 
-def recovery_action_rate(
+def recovery_action_rate_legs(
     env: ManagerBasedRLEnv,
 ) -> torch.Tensor:
-    """Penalty for action changes between steps (Table I, scale=-1e-2).
+    """Leg action change penalty (wheels excluded!). Paper scale=-1e-2."""
+    action = env.action_manager.action
+    prev_action = env.action_manager.prev_action
+    leg_diff = torch.sum(torch.square(action[:, :12] - prev_action[:, :12]), dim=1)
+    return _get_cw(env) * leg_diff
 
-    Only penalizes leg actions (indices 0:12), wheels excluded.
-    """
-    # action_manager stores last two actions
-    if hasattr(env, 'action_manager'):
-        current = env.action_manager.action[:, :12]
-        prev = env.action_manager.prev_action[:, :12]
-        return torch.sum(torch.square(current - prev), dim=1)
-    return torch.zeros(env.num_envs, device=env.device)
 
+# ── Constant Penalties ──
 
 def recovery_joint_velocity(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Penalty for joint velocities (Table I, scale=-2e-2)."""
+    """Joint velocity penalty. Paper scale=-2e-2."""
     asset: Articulation = env.scene[asset_cfg.name]
     return torch.sum(torch.square(asset.data.joint_vel), dim=1)
 
@@ -149,7 +136,7 @@ def recovery_torques(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Penalty for joint torques (Table I, scale=-2.5e-5)."""
+    """Torque penalty. Paper scale=-2.5e-5."""
     asset: Articulation = env.scene[asset_cfg.name]
     return torch.sum(torch.square(asset.data.applied_torque), dim=1)
 
@@ -158,7 +145,7 @@ def recovery_joint_acceleration(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Penalty for joint accelerations (Table I, scale=-2.5e-7)."""
+    """Joint acceleration penalty. Paper scale=-2.5e-7."""
     asset: Articulation = env.scene[asset_cfg.name]
     return torch.sum(torch.square(asset.data.joint_acc), dim=1)
 
@@ -166,13 +153,72 @@ def recovery_joint_acceleration(
 def recovery_wheel_velocity(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    wheel_joint_names: list = None,
 ) -> torch.Tensor:
-    """Penalty for excessive wheel spinning (Table I, scale=-2e-2)."""
+    """Wheel spin penalty. Paper scale=-2e-2."""
     asset: Articulation = env.scene[asset_cfg.name]
-    if wheel_joint_names and asset_cfg.joint_ids is not None:
-        wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
-    else:
-        # Default: last 4 joints are wheels
-        wheel_vel = asset.data.joint_vel[:, -4:]
-    return torch.sum(torch.square(wheel_vel), dim=1)
+    return torch.sum(torch.square(asset.data.joint_vel[:, -4:]), dim=1)
+
+
+# ── Free-fall reset event ──
+
+def reset_with_freefall(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    drop_height: float = 1.1,
+):
+    """Reset robot with random orientation at drop_height. Gravity does the rest.
+
+    Paper protocol: random orientation + random joints + zero torques + 1.1m drop.
+    The 2s free-fall happens naturally in the first ~100 steps of the episode.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    if len(env_ids) == 0:
+        return
+
+    # Random quaternion
+    u1 = torch.rand(len(env_ids), device=env.device)
+    u2 = torch.rand(len(env_ids), device=env.device) * 2 * math.pi
+    u3 = torch.rand(len(env_ids), device=env.device) * 2 * math.pi
+    # Uniform random rotation (Shoemake method)
+    qw = torch.sqrt(1 - u1) * torch.sin(u2)
+    qx = torch.sqrt(1 - u1) * torch.cos(u2)
+    qy = torch.sqrt(u1) * torch.sin(u3)
+    qz = torch.sqrt(u1) * torch.cos(u3)
+    quat = torch.stack([qw, qx, qy, qz], dim=1)
+
+    # Set root state
+    root_state = asset.data.default_root_state[env_ids].clone()
+    root_state[:, 2] = drop_height
+    root_state[:, 3:7] = quat
+    root_state[:, 7:] = 0.0  # zero velocity
+    asset.write_root_state_to_sim(root_state, env_ids)
+
+    # Random joint positions + zero velocity
+    joint_pos = asset.data.default_joint_pos[env_ids].clone()
+    joint_pos += torch.empty_like(joint_pos).uniform_(-0.5, 0.5)
+    asset.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
+
+    # Reset ED step counter
+    if hasattr(env, "_recovery_step_count"):
+        env._recovery_step_count[env_ids] = 0
+
+
+# ── Success checker (for logging) ──
+
+def check_recovery_success(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    height_threshold: float = 0.42,
+    joint_threshold: float = 0.5,
+    vel_threshold: float = 0.1,
+    ori_threshold: float = 0.1,
+) -> torch.Tensor:
+    """Boolean mask: which envs successfully recovered."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    h_ok = asset.data.root_pos_w[:, 2] > height_threshold
+    j_ok = torch.norm(asset.data.joint_pos - asset.data.default_joint_pos, dim=1) < joint_threshold
+    v_ok = torch.max(torch.abs(asset.data.joint_vel), dim=1).values < vel_threshold
+    ideal = torch.tensor([0.0, 0.0, -1.0], device=env.device)
+    o_ok = torch.norm(asset.data.projected_gravity_b - ideal, dim=1) < ori_threshold
+    return h_ok & j_ok & v_ok & o_ok
