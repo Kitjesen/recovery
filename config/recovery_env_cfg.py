@@ -69,6 +69,13 @@ class RecoveryRewardsCfg:
         weight=-1e-2,
     )
 
+    # ── Support state (NEW — paper Section E) ──
+    recovery_support_state = RewTerm(
+        func=mdp.recovery_support_state,
+        weight=5.0,  # reward for all 4 wheels on ground
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"), "threshold": 1.0},
+    )
+
     # ── Constant penalties ──
     recovery_joint_velocity = RewTerm(
         func=mdp.recovery_joint_velocity,
