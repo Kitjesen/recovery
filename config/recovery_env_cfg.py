@@ -54,7 +54,7 @@ class RecoveryRewardsCfg:
     )
     recovery_base_orientation = RewTerm(
         func=mdp.recovery_base_orientation,
-        weight=50.0,   # positive: reward for being upright
+        weight=-50.0,  # negative: (g_b-e_z)^2 is error, penalize deviation
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
