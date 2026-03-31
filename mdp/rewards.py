@@ -53,12 +53,14 @@ def _get_ed(env: ManagerBasedRLEnv, k: int = 3) -> torch.Tensor:
         env._recovery_step_count += 1
         env._recovery_ed_last_step = current_step
 
-    t = env._recovery_step_count
-    T = float(env.max_episode_length)  # 250 steps (5s @ 50Hz)
-    a = T / 2.0
+    # Convert steps to seconds: t_sec = steps * dt, T_sec = episode_length_s
+    dt = 1.0 / 50.0  # 50Hz control
+    t_sec = env._recovery_step_count * dt
+    T_sec = float(env.max_episode_length) * dt  # 5.0 seconds
+    a = T_sec / 2.0  # = 2.5
 
-    # ed = (a * t / T)^k — paper formula exactly, no normalization
-    ed = (a * t / T) ** k
+    # ed = (a * t / T)^k in SECONDS — gives ed ∈ [0, ~15.6] not millions
+    ed = (a * t_sec / T_sec) ** k
     return ed
 
 
