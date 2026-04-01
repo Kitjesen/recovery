@@ -279,3 +279,42 @@ def check_recovery_success(
     ideal = torch.tensor([0.0, 0.0, -1.0], device=env.device)
     o_ok = torch.norm(asset.data.projected_gravity_b - ideal, dim=1) < ori_threshold
     return h_ok & j_ok & v_ok & o_ok
+
+
+# ── Free-fall Action Override ──
+
+def zero_action_freefall(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    """During free-fall (first 100 steps), write zero velocity to all joints.
+
+    This simulates 'set joint torques to zero' from the paper.
+    The PD controller will produce: tau = KP*(default - current) + KD*(0 - vel)
+    which gently brings joints to rest, letting gravity do the work.
+
+    Called as an interval event every step.
+    """
+    if not hasattr(env, "_recovery_step_count"):
+        return
+
+    asset: Articulation = env.scene[asset_cfg.name]
+
+    # Find envs still in free-fall
+    freefall_mask = env._recovery_step_count < FREEFALL_STEPS
+    freefall_ids = torch.where(freefall_mask)[0]
+
+    if len(freefall_ids) == 0:
+        return
+
+    # Write default joint positions + zero velocity
+    # This makes PD output minimal torque (joints near default, vel=0 target)
+    joint_pos = asset.data.default_joint_pos[freefall_ids].clone()
+    joint_vel = torch.zeros_like(joint_pos)
+    asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=freefall_ids)
+
+    # Also zero the root velocity (let gravity be the only force)
+    root_state = asset.data.root_state_w[freefall_ids].clone()
+    root_state[:, 7:10] = 0.0  # zero linear velocity - actually don't, let gravity work
+    # Don't zero velocity - robot needs to fall naturally under gravity

@@ -152,6 +152,14 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
         self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
         self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
 
+        # ── Free-fall: zero joint commands for first 2s (paper Section III-A) ──
+        self.events.freefall_zero_action = EventTerm(
+            func=mdp.zero_action_freefall,
+            mode="interval",
+            interval_range_s=(0.02, 0.02),  # every control step (50Hz)
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+
         # ── Disable ALL DR (Phase 0) ──
         self.events.randomize_rigid_body_material = None
         self.events.randomize_rigid_body_mass_base = None
