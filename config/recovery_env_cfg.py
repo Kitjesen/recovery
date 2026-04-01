@@ -160,14 +160,29 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
 
-        # ── Disable ALL DR (Phase 0) ──
-        self.events.randomize_rigid_body_material = None
+        # ── DR enabled (paper Section IV-A) ──
+        # friction: base class default (0.3, 1.0) static, (0.3, 0.8) dynamic
+        # mass: disabled (class-based API incompatible)
         self.events.randomize_rigid_body_mass_base = None
         self.events.randomize_rigid_body_mass_others = None
-        self.events.randomize_com_positions = None
-        self.events.randomize_apply_external_force_torque = None
+        # COM: base class default +/-5cm
+        # external_force: re-create (parent set to None)
+        from isaaclab.envs.mdp import apply_external_force_torque
+        self.events.randomize_apply_external_force_torque = EventTerm(
+            func=apply_external_force_torque,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+                "force_range": (-10.0, 10.0),
+                "torque_range": (-10.0, 10.0),
+            },
+        )
+        # actuator_gains: disabled (class-based API incompatible)
         self.events.randomize_actuator_gains = None
-        self.events.randomize_push_robot = None
+        # push_robot: base class default (push every 10-15s)
+
+        # ── Wheel vel_scale < 1.0 for recovery (paper Section C) ──
+        self.actions.joint_vel.scale = 0.8
 
         # ── Single frame observations (matching paper Fig.3) ──
         self.observations.policy.history_length = 1

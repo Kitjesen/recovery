@@ -8,7 +8,7 @@ class RecoveryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """Recovery: standard MLP actor-critic, single frame obs."""
     seed = 42
     num_steps_per_env = 48  # shorter rollout for 5s episodes
-    max_iterations = 5000
+    max_iterations = 10000
     save_interval = 200
     experiment_name = "thunder_recovery"
     run_name = ""
