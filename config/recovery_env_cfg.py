@@ -50,11 +50,11 @@ class RecoveryRewardsCfg:
     recovery_base_height = RewTerm(
         func=mdp.recovery_base_height,
         weight=120.0,
-        params={"target_height": 0.388, "sigma": 0.1, "asset_cfg": SceneEntityCfg("robot")},
+        params={"target_height": 0.426, "sigma": 0.1, "asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_base_orientation = RewTerm(
         func=mdp.recovery_base_orientation,
-        weight=-50.0,  # negative: (g_b-e_z)^2 is error, penalize deviation
+        weight=50.0,  # positive: exp(-error), reward for upright
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
@@ -160,6 +160,29 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
         self.events.randomize_apply_external_force_torque = None
         self.events.randomize_actuator_gains = None
         self.events.randomize_push_robot = None
+
+        # ── Single frame observations (matching paper Fig.3) ──
+        self.observations.policy.history_length = 1
+        self.observations.critic.history_length = 1
+
+        # Replace velocity_commands(useless for recovery) with base_lin_vel
+        from isaaclab.managers import ObservationTermCfg as ObsTerm
+        from isaaclab.utils.noise import UniformNoiseCfg as Unoise
+        import robot_lab.tasks.manager_based.locomotion.velocity.mdp as obs_mdp
+
+        # Remove velocity commands from actor obs
+        self.observations.policy.velocity_commands = None
+        # Add body linear velocity (paper: IMU body linear velocity)
+        self.observations.policy.base_lin_vel = ObsTerm(
+            func=obs_mdp.base_lin_vel,
+            noise=Unoise(n_min=-0.1, n_max=0.1),
+            clip=(-100.0, 100.0),
+            scale=1.0,
+        )
+
+        # Same for critic: replace cmd with lin_vel
+        self.observations.critic.velocity_commands = None
+        # Critic already has base_lin_vel from base config
 
         # ── Remove height scan observations ──
         if hasattr(self.observations, 'height_scan_group'):

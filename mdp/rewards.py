@@ -100,7 +100,7 @@ def recovery_stand_joint_pos(
 
 def recovery_base_height(
     env: ManagerBasedRLEnv,
-    target_height: float = 0.388,
+    target_height: float = 0.426,
     sigma: float = 0.1,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
@@ -115,11 +115,19 @@ def recovery_base_orientation(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """(g_b - e_z)^2. Table I scale=50. Weight should be -50."""
+    """Reward for upright orientation (exp form).
+
+    r = ED * exp(-||g_body - [0,0,-1]||^2)
+    Upright: error=0 -> r=1. Fallen: error~4 -> r~0.02.
+    Weight = +50 (positive reward for being upright).
+    """
     asset: Articulation = env.scene[asset_cfg.name]
     ideal = torch.tensor([0.0, 0.0, -1.0], device=env.device)
     error = torch.sum(torch.square(asset.data.projected_gravity_b - ideal), dim=1)
-    return _get_ed(env) * error
+    raw = torch.exp(-error)
+    return _get_ed(env) * raw
+
+
 
 
 # ── Support State Reward (NEW — from paper Section E) ──
