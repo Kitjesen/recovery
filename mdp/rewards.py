@@ -137,27 +137,28 @@ def recovery_support_state(
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
     threshold: float = 1.0,
 ) -> torch.Tensor:
-    """Reward when all 4 wheels contact ground simultaneously.
-
-    Paper: "we provide a reward for the support state, defined as the condition
-    where all four wheels are in contact with the ground simultaneously"
-    """
+    """Reward when all 4 wheels contact ground simultaneously."""
     if _is_freefall(env).all():
         return torch.zeros(env.num_envs, device=env.device)
 
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    # net_forces_w_history shape: (N, history, num_bodies, 3)
-    # Check if force magnitude > threshold for each body
     forces = contact_sensor.data.net_forces_w_history[:, 0, :, :]  # (N, num_bodies, 3)
     force_mag = torch.norm(forces, dim=-1)  # (N, num_bodies)
 
-    # Last 4 bodies should be foot links — check all have contact
-    foot_contact = force_mag[:, -4:] > threshold  # (N, 4)
-    all_feet_contact = foot_contact.all(dim=1).float()  # (N,) 1.0 if all 4 wheels on ground
+    # Use body_ids from sensor_cfg to get correct foot indices
+    if sensor_cfg.body_ids is not None and sensor_cfg.body_ids != slice(None):
+        foot_forces = force_mag[:, sensor_cfg.body_ids]  # (N, 4)
+    else:
+        # Fallback: foot bodies are at indices 4,8,12,16 in URDF order
+        foot_idx = [4, 8, 12, 16]
+        foot_forces = force_mag[:, foot_idx]
 
-    # Only reward during recovery phase
+    foot_contact = foot_forces > threshold  # (N, 4)
+    all_feet_contact = foot_contact.all(dim=1).float()
     all_feet_contact = all_feet_contact * (~_is_freefall(env)).float()
     return all_feet_contact
+
+
 
 
 # ── Behavior Rewards (×CW, zero during free-fall) ──
