@@ -61,8 +61,8 @@ class RecoveryRewardsCfg:
     # ── Behavior rewards (CW built-in) ──
     recovery_body_collision = RewTerm(
         func=mdp.recovery_body_collision,
-        weight=-5e-2,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*")},
+        weight=-5e-4,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=["base_link", ".*thigh.*", ".*calf.*"])},
     )
     recovery_action_rate_legs = RewTerm(
         func=mdp.recovery_action_rate_legs,

@@ -167,8 +167,31 @@ def recovery_body_collision(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
 ) -> torch.Tensor:
-    """Disabled for now — sensor shape needs verification."""
-    return torch.zeros(env.num_envs, device=env.device)
+    """Body collision penalty: sum of contact forces on thigh/calf/base.
+
+    Paper: B = {shanks, thighs, base}, r = sum(||lambda_b||^2)
+    Scale = -5e-2. Only active during recovery phase (not free-fall).
+    """
+    if _is_freefall(env).all():
+        return torch.zeros(env.num_envs, device=env.device)
+
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w_history[:, 0, :, :]  # (N, num_bodies, 3)
+    force_sq = torch.sum(torch.square(forces), dim=-1)  # (N, num_bodies)
+
+    # Use body_ids from sensor_cfg if available
+    if sensor_cfg.body_ids is not None and sensor_cfg.body_ids != slice(None):
+        body_forces = force_sq[:, sensor_cfg.body_ids]
+    else:
+        # Fallback: base(0) + thigh(2,6,10,14) + calf(3,7,11,15)
+        body_idx = [0, 2, 3, 6, 7, 10, 11, 14, 15]
+        body_forces = force_sq[:, body_idx]
+
+    penalty = torch.sum(body_forces, dim=1)
+    penalty = penalty * (~_is_freefall(env)).float()
+    return _get_cw(env) * penalty
+
+
 
 
 def recovery_action_rate_legs(
