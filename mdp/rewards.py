@@ -102,12 +102,31 @@ def recovery_base_height(
     target_height: float = 0.426,
     sigma: float = 0.1,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
 ) -> torch.Tensor:
-    """exp(-max(h_target-h,0)^2 / sigma^2). Table I scale=120."""
+    """Height reward ONLY when feet are on ground.
+
+    Prevents cheating (raising body without proper stance).
+    r = ED * exp(-height_error) * feet_on_ground_ratio
+    """
     asset: Articulation = env.scene[asset_cfg.name]
     height_error = torch.clamp(target_height - asset.data.root_pos_w[:, 2], min=0.0)
     raw = torch.exp(-torch.square(height_error) / (sigma ** 2))
-    return _get_ed(env) * raw
+
+    # Check how many feet are on ground (0-4)
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w_history[:, 0, :, :]
+    force_mag = torch.norm(forces, dim=-1)
+    if sensor_cfg.body_ids is not None and sensor_cfg.body_ids != slice(None):
+        foot_forces = force_mag[:, sensor_cfg.body_ids]
+    else:
+        foot_idx = [4, 8, 12, 16]
+        foot_forces = force_mag[:, foot_idx]
+    feet_ratio = (foot_forces > 1.0).float().mean(dim=1)  # 0~1: fraction of feet on ground
+
+    return _get_ed(env) * raw * feet_ratio
+
+
 
 
 def recovery_base_orientation(

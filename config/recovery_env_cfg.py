@@ -49,12 +49,12 @@ class RecoveryRewardsCfg:
     )
     recovery_base_height = RewTerm(
         func=mdp.recovery_base_height,
-        weight=120.0,
-        params={"target_height": 0.426, "sigma": 0.1, "asset_cfg": SceneEntityCfg("robot")},
+        weight=200.0,  # increased: force standing up
+        params={"target_height": 0.426, "sigma": 0.1, "asset_cfg": SceneEntityCfg("robot"), "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*")},
     )
     recovery_base_orientation = RewTerm(
         func=mdp.recovery_base_orientation,
-        weight=50.0,  # positive: exp(-error), reward for upright
+        weight=10.0,  # reduced: avoid lazy flip-only strategy
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
@@ -72,29 +72,29 @@ class RecoveryRewardsCfg:
     # ── Support state (NEW — paper Section E) ──
     recovery_support_state = RewTerm(
         func=mdp.recovery_support_state,
-        weight=5.0,  # reward for all 4 wheels on ground
+        weight=20.0,  # big reward for 4-wheel contact
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"), "threshold": 1.0},
     )
 
     # ── Constant penalties ──
     recovery_joint_velocity = RewTerm(
         func=mdp.recovery_joint_velocity,
-        weight=-2e-2,
+        weight=0.0,  # disabled: let robot move
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_torques = RewTerm(
         func=mdp.recovery_torques,
-        weight=-2.5e-5,
+        weight=0.0,  # disabled
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_joint_acceleration = RewTerm(
         func=mdp.recovery_joint_acceleration,
-        weight=-2.5e-7,
+        weight=0.0,  # disabled
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_wheel_velocity = RewTerm(
         func=mdp.recovery_wheel_velocity,
-        weight=-2e-2,
+        weight=0.0,  # disabled
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
