@@ -94,7 +94,7 @@ def recovery_stand_joint_pos(
     asset: Articulation = env.scene[asset_cfg.name]
     error = torch.sum(torch.square(asset.data.joint_pos - asset.data.default_joint_pos), dim=1)
     raw = torch.exp(-error / (sigma ** 2))
-    return _get_ed(env) * raw
+    return raw  # no ED, direct per-step reward
 
 
 def recovery_base_height(
@@ -124,7 +124,7 @@ def recovery_base_height(
         foot_forces = force_mag[:, foot_idx]
     feet_ratio = (foot_forces > 1.0).float().mean(dim=1)  # 0~1: fraction of feet on ground
 
-    return _get_ed(env) * raw * feet_ratio
+    return raw * feet_ratio  # no ED, direct per-step reward
 
 
 
@@ -143,9 +143,7 @@ def recovery_base_orientation(
     ideal = torch.tensor([0.0, 0.0, -1.0], device=env.device)
     error = torch.sum(torch.square(asset.data.projected_gravity_b - ideal), dim=1)
     raw = torch.exp(-error)
-    return _get_ed(env) * raw
-
-
+    return raw  # no ED, direct per-step reward
 
 
 # ── Support State Reward (NEW — from paper Section E) ──
@@ -359,3 +357,20 @@ def zero_action_freefall(
     root_state = asset.data.root_state_w[freefall_ids].clone()
     root_state[:, 7:10] = 0.0  # zero linear velocity - actually don't, let gravity work
     # Don't zero velocity - robot needs to fall naturally under gravity
+
+
+# ── Upward Reward (proven in locomotion, no ED needed) ──
+
+def recovery_upward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Direct upward reward — same as locomotion upward.
+
+    r = clamp(-gravity_z, 0, 0.7) / 0.7
+    Standing: ~1.0, Fallen: ~0.0. Every step, no ED.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    gravity_z = asset.data.projected_gravity_b[:, 2]
+    return torch.clamp(-gravity_z, 0.0, 0.7) / 0.7
+
