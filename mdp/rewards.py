@@ -61,8 +61,7 @@ def _get_ed(env: ManagerBasedRLEnv, k: int = 3) -> torch.Tensor:
     a = T_sec / 2.0
 
     ed = (a * t_sec / T_sec) ** k
-    # Zero during free-fall
-    ed = ed * (~_is_freefall(env)).float()
+    # ED covers entire episode (paper Eq.1), free-fall has ed≈0 naturally
     return ed
 
 
@@ -188,7 +187,7 @@ def recovery_body_collision(
         body_forces = force_sq[:, body_idx]
 
     penalty = torch.sum(body_forces, dim=1)
-    penalty = penalty * (~_is_freefall(env)).float()
+    penalty = penalty
     return _get_cw(env) * penalty
 
 
@@ -201,7 +200,6 @@ def recovery_action_rate_legs(
     action = env.action_manager.action
     prev_action = env.action_manager.prev_action
     leg_diff = torch.sum(torch.square(action[:, :12] - prev_action[:, :12]), dim=1)
-    leg_diff = leg_diff * (~_is_freefall(env)).float()
     return _get_cw(env) * leg_diff
 
 
@@ -214,7 +212,7 @@ def recovery_joint_velocity(
     """sum(q_dot²). Zero during free-fall."""
     asset: Articulation = env.scene[asset_cfg.name]
     penalty = torch.sum(torch.square(asset.data.joint_vel), dim=1)
-    return penalty * (~_is_freefall(env)).float()
+    return penalty
 
 
 def recovery_torques(
@@ -224,7 +222,7 @@ def recovery_torques(
     """sum(tau²). Zero during free-fall."""
     asset: Articulation = env.scene[asset_cfg.name]
     penalty = torch.sum(torch.square(asset.data.applied_torque), dim=1)
-    return penalty * (~_is_freefall(env)).float()
+    return penalty
 
 
 def recovery_joint_acceleration(
@@ -234,7 +232,7 @@ def recovery_joint_acceleration(
     """sum(q_ddot²). Zero during free-fall."""
     asset: Articulation = env.scene[asset_cfg.name]
     penalty = torch.sum(torch.square(asset.data.joint_acc), dim=1)
-    return penalty * (~_is_freefall(env)).float()
+    return penalty
 
 
 def recovery_wheel_velocity(
@@ -244,7 +242,7 @@ def recovery_wheel_velocity(
     """sum(wheel_vel²). Zero during free-fall."""
     asset: Articulation = env.scene[asset_cfg.name]
     penalty = torch.sum(torch.square(asset.data.joint_vel[:, -4:]), dim=1)
-    return penalty * (~_is_freefall(env)).float()
+    return penalty
 
 
 # ── Free-fall reset ──
