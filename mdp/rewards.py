@@ -296,10 +296,54 @@ def recovery_wheel_velocity(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """sum(wheel_vel²). Zero during free-fall."""
+    """sum(wheel_vel²) gated by ED.
+
+    Early phase (ED≈0): wheels are free → policy can spin them for wheel-leg
+    coordinated flipping (paper's core contribution: -15.8% to -26.2% joint
+    torque). Late phase (ED large): full penalty → converge to still stance.
+    """
     asset: Articulation = env.scene[asset_cfg.name]
     penalty = torch.sum(torch.square(asset.data.joint_vel[:, -4:]), dim=1)
-    return penalty
+    T_sec = float(env.max_episode_length) / 50.0
+    ed_max = (T_sec / 2.0) ** 3
+    gate = torch.clamp(_get_ed(env) / ed_max, 0.0, 1.0)
+    return gate * penalty
+
+
+def recovery_wheel_leg_coord(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_wheel_speed: float = 40.0,
+) -> torch.Tensor:
+    """Wheel-leg coordination reward (paper core contribution).
+
+    Rewards actively spinning wheels while the body is tilted, which is the
+    mechanism the paper credits for 15.8-26.2% joint torque reduction: wheels
+    push against the ground to assist flipping instead of relying only on legs.
+
+    r = (1 - ED/ED_max) · (|ω_wheel| / max_wheel_speed) · ||g_xy||
+
+    - (1 - ED/ED_max): ~1 in exploration phase, decays to 0 in convergence
+      phase — coordination only helps before the robot is upright.
+    - |ω_wheel| clipped to max_wheel_speed: sum of absolute wheel speeds.
+    - ||g_xy||: tilt factor, 0 when upright, ~1 when sideways/upside-down.
+
+    Zero when upright (regardless of wheel motion) so it does not interfere
+    with the task/ED convergence phase.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+
+    T_sec = float(env.max_episode_length) / 50.0
+    ed_max = (T_sec / 2.0) ** 3
+    early_gate = torch.clamp(1.0 - _get_ed(env) / ed_max, 0.0, 1.0)
+
+    wheel_speed = torch.sum(torch.abs(asset.data.joint_vel[:, -4:]), dim=1)
+    wheel_speed = torch.clamp(wheel_speed, max=max_wheel_speed) / max_wheel_speed
+
+    tilt = torch.norm(asset.data.projected_gravity_b[:, :2], dim=1)
+    tilt = torch.clamp(tilt, 0.0, 1.0)
+
+    return early_gate * wheel_speed * tilt
 
 
 # ── Free-fall reset ──
@@ -397,6 +441,81 @@ def zero_action_freefall(
     root_state = asset.data.root_state_w[freefall_ids].clone()
     root_state[:, 7:10] = 0.0  # zero linear velocity - actually don't, let gravity work
     # Don't zero velocity - robot needs to fall naturally under gravity
+
+
+# ── Privileged observations (critic-only, paper Fig.3 asymmetric AC) ──
+
+def priv_base_height(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Base z-position (root_pos_w[:, 2]) — (N, 1).
+
+    Actor cannot observe absolute base height from joint encoders; critic uses
+    it directly to evaluate recovery progress.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    return asset.data.root_pos_w[:, 2:3]
+
+
+def priv_base_lin_vel_clean(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Clean body-frame linear velocity (N, 3) — no IMU noise.
+
+    The policy's base_lin_vel has Unoise injected (simulating IMU drift); the
+    critic gets the ground-truth sim value.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    return asset.data.root_lin_vel_b
+
+
+def priv_base_ang_vel_clean(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Clean body-frame angular velocity (N, 3) — no IMU noise."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    return asset.data.root_ang_vel_b
+
+
+def priv_foot_contact(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    threshold: float = 1.0,
+) -> torch.Tensor:
+    """Binary foot-contact state (N, num_feet).
+
+    Actor has no contact sensors on a real robot (or only noisy ones); critic
+    gets the exact ground-contact indicator, which is the strongest signal for
+    whether the robot has reached the support state.
+    """
+    sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = sensor.data.net_forces_w_history[:, 0, :, :]
+    magnitude = torch.norm(forces, dim=-1)
+    if sensor_cfg.body_ids is not None and sensor_cfg.body_ids != slice(None):
+        magnitude = magnitude[:, sensor_cfg.body_ids]
+    else:
+        magnitude = magnitude[:, [4, 8, 12, 16]]
+    return (magnitude > threshold).float()
+
+
+def priv_body_contact_force(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+) -> torch.Tensor:
+    """Per-body contact-force magnitude on shanks/thighs/base (N, num_bodies).
+
+    Tells the critic whether the robot is dragging limbs or hitting the ground
+    with its body, which the actor cannot directly sense.
+    """
+    sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = sensor.data.net_forces_w_history[:, 0, :, :]
+    magnitude = torch.norm(forces, dim=-1)
+    if sensor_cfg.body_ids is not None and sensor_cfg.body_ids != slice(None):
+        magnitude = magnitude[:, sensor_cfg.body_ids]
+    return magnitude
 
 
 

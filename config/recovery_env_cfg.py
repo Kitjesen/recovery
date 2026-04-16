@@ -76,6 +76,13 @@ class RecoveryRewardsCfg:
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"), "threshold": 1.0},
     )
 
+    # ── Wheel-leg coordination (paper core contribution, early-phase only) ──
+    recovery_wheel_leg_coord = RewTerm(
+        func=mdp.recovery_wheel_leg_coord,
+        weight=2.0,
+        params={"asset_cfg": SceneEntityCfg("robot"), "max_wheel_speed": 40.0},
+    )
+
     # ── Constant penalties (paper Table I) ──
     recovery_joint_velocity = RewTerm(
         func=mdp.recovery_joint_velocity,
@@ -188,14 +195,15 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
         self.observations.policy.history_length = 1
         self.observations.critic.history_length = 1
 
-        # Replace velocity_commands(useless for recovery) with base_lin_vel
+        # ── Observations: asymmetric actor-critic (paper Fig.3) ──
         from isaaclab.managers import ObservationTermCfg as ObsTerm
         from isaaclab.utils.noise import UniformNoiseCfg as Unoise
         import robot_lab.tasks.manager_based.locomotion.velocity.mdp as obs_mdp
 
-        # Remove velocity commands from actor obs
+        # Actor: onboard-realistic, noisy IMU + encoders only
+        # Remove velocity commands from actor (recovery has no cmd)
         self.observations.policy.velocity_commands = None
-        # Add body linear velocity (paper: IMU body linear velocity)
+        # Noisy body linear velocity (IMU approximation)
         self.observations.policy.base_lin_vel = ObsTerm(
             func=obs_mdp.base_lin_vel,
             noise=Unoise(n_min=-0.1, n_max=0.1),
@@ -203,9 +211,45 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
             scale=1.0,
         )
 
-        # Same for critic: replace cmd with lin_vel
+        # Critic: everything the actor has + privileged sim-only signals
         self.observations.critic.velocity_commands = None
-        # Critic already has base_lin_vel from base config
+
+        # (1) Clean base linear/angular velocity (no IMU noise)
+        self.observations.critic.priv_base_lin_vel = ObsTerm(
+            func=mdp.priv_base_lin_vel_clean,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-100.0, 100.0),
+            scale=1.0,
+        )
+        self.observations.critic.priv_base_ang_vel = ObsTerm(
+            func=mdp.priv_base_ang_vel_clean,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-100.0, 100.0),
+            scale=1.0,
+        )
+        # (2) Base z-height — not observable from onboard sensors
+        self.observations.critic.priv_base_height = ObsTerm(
+            func=mdp.priv_base_height,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-5.0, 5.0),
+            scale=1.0,
+        )
+        # (3) Foot contact binary state (support state signal)
+        self.observations.critic.priv_foot_contact = ObsTerm(
+            func=mdp.priv_foot_contact,
+            params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
+                    "threshold": 1.0},
+            clip=(0.0, 1.0),
+            scale=1.0,
+        )
+        # (4) Body (shank/thigh/base) contact magnitude — collision state
+        self.observations.critic.priv_body_contact_force = ObsTerm(
+            func=mdp.priv_body_contact_force,
+            params={"sensor_cfg": SceneEntityCfg("contact_forces",
+                    body_names=["base_link", ".*thigh.*", ".*calf.*"])},
+            clip=(0.0, 500.0),
+            scale=0.01,
+        )
 
         # ── Remove height scan observations ──
         if hasattr(self.observations, 'height_scan_group'):
