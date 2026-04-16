@@ -41,7 +41,7 @@ class RecoveryRewardsCfg:
         weight=1e-10,
     )
 
-    # ── Task rewards (ED built-in) ──
+    # ── Task rewards (×ED, paper Table I) ──
     recovery_stand_joint_pos = RewTerm(
         func=mdp.recovery_stand_joint_pos,
         weight=42.0,
@@ -49,19 +49,19 @@ class RecoveryRewardsCfg:
     )
     recovery_base_height = RewTerm(
         func=mdp.recovery_base_height,
-        weight=200.0,  # increased: force standing up
-        params={"target_height": 0.426, "sigma": 0.1, "asset_cfg": SceneEntityCfg("robot"), "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*")},
+        weight=120.0,
+        params={"target_height": 0.426, "sigma": 0.1, "asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_base_orientation = RewTerm(
         func=mdp.recovery_base_orientation,
-        weight=10.0,  # reduced: avoid lazy flip-only strategy
+        weight=50.0,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
-    # ── Behavior rewards (CW built-in) ──
+    # ── Behavior rewards (×CW, paper Table I) ──
     recovery_body_collision = RewTerm(
         func=mdp.recovery_body_collision,
-        weight=-5e-4,
+        weight=-5e-2,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=["base_link", ".*thigh.*", ".*calf.*"])},
     )
     recovery_action_rate_legs = RewTerm(
@@ -69,39 +69,32 @@ class RecoveryRewardsCfg:
         weight=-1e-2,
     )
 
-    # ── Upward (direct, proven in locomotion)
-    recovery_upward = RewTerm(
-        func=mdp.recovery_upward,
-        weight=5.0,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
-
-    # ── Support state (NEW — paper Section E) ──
+    # ── Support state (paper Section E, auxiliary shaping) ──
     recovery_support_state = RewTerm(
         func=mdp.recovery_support_state,
-        weight=20.0,  # big reward for 4-wheel contact
+        weight=5.0,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"), "threshold": 1.0},
     )
 
-    # ── Constant penalties ──
+    # ── Constant penalties (paper Table I) ──
     recovery_joint_velocity = RewTerm(
         func=mdp.recovery_joint_velocity,
-        weight=-1e-3,  # small: allow motion
+        weight=-2e-2,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_torques = RewTerm(
         func=mdp.recovery_torques,
-        weight=-1e-6,  # small
+        weight=-2.5e-5,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_joint_acceleration = RewTerm(
         func=mdp.recovery_joint_acceleration,
-        weight=0.0,  # keep disabled
+        weight=-2.5e-7,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_wheel_velocity = RewTerm(
         func=mdp.recovery_wheel_velocity,
-        weight=0.0,  # disabled
+        weight=-2e-2,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
