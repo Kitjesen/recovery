@@ -35,13 +35,26 @@ class RecoveryRewardsCfg:
     Just set weights here, env handles the rest.
     """
 
-    # Step counter (tiny weight — must be called every step for ED counter)
+    # Step counter: side-effect term that advances per-env _recovery_step_count
+    # every control step; ED reads this counter. Weight is tiny-but-nonzero so
+    # the reward manager is guaranteed to call it (1e-10 can be pruned in some
+    # Isaac Lab versions → ED would stay at 0 forever and training would go
+    # nowhere).
     recovery_step_counter = RewTerm(
         func=mdp.recovery_step_counter,
-        weight=1e-10,
+        weight=1e-6,
     )
 
-    # ── Task rewards (ED built-in) ──
+    # Logging only: end-of-episode success indicator (paper criteria).
+    # Tiny weight guarantees the term is computed (some RewardManager versions
+    # skip weight=0). Effective training contribution ~0.
+    recovery_success_rate = RewTerm(
+        func=mdp.recovery_success_rate,
+        weight=1e-6,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    # ── Task rewards (×ED, paper Table I) ──
     recovery_stand_joint_pos = RewTerm(
         func=mdp.recovery_stand_joint_pos,
         weight=42.0,
@@ -49,59 +62,71 @@ class RecoveryRewardsCfg:
     )
     recovery_base_height = RewTerm(
         func=mdp.recovery_base_height,
-        weight=200.0,  # increased: force standing up
-        params={"target_height": 0.426, "sigma": 0.1, "asset_cfg": SceneEntityCfg("robot"), "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*")},
+        weight=120.0,
+        params={"target_height": 0.426, "sigma": 0.1, "asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_base_orientation = RewTerm(
         func=mdp.recovery_base_orientation,
-        weight=10.0,  # reduced: avoid lazy flip-only strategy
+        weight=50.0,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
-    # ── Behavior rewards (CW built-in) ──
+    # ── Behavior rewards (×CW, paper Table I) ──
+    # body_collision: raw sum ||F||² on thigh/calf/base. Without a clip the
+    # penalty can exceed -1k/step on high-impact contacts (||F||>300 N) and
+    # dominate gradients early on. force_clip=50 N bounds per-body contribution
+    # at 50²=2500; with CW≈0.3 × weight -5e-2 the worst-case penalty is
+    # ~O(-30)/step for 9 contacting bodies, comparable to other penalties.
     recovery_body_collision = RewTerm(
         func=mdp.recovery_body_collision,
-        weight=-5e-4,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=["base_link", ".*thigh.*", ".*calf.*"])},
+        weight=-5e-2,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["base_link", ".*thigh.*", ".*calf.*"]),
+            "force_clip": 50.0,
+        },
     )
     recovery_action_rate_legs = RewTerm(
         func=mdp.recovery_action_rate_legs,
         weight=-1e-2,
     )
 
-    # ── Upward (direct, proven in locomotion)
-    recovery_upward = RewTerm(
-        func=mdp.recovery_upward,
-        weight=5.0,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
-
-    # ── Support state (NEW — paper Section E) ──
+    # ── Support state (paper §E, per-step binary) ──
+    # Paper verbatim: "a reward for the support state, defined as the
+    # condition where all four wheels are in contact with the ground
+    # simultaneously." → state-conditional, awarded each step support holds.
     recovery_support_state = RewTerm(
         func=mdp.recovery_support_state,
-        weight=20.0,  # big reward for 4-wheel contact
+        weight=5.0,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"), "threshold": 1.0},
     )
 
-    # ── Constant penalties ──
+    # ── Wheel-leg coordination (paper core contribution, early-phase only) ──
+    # Max ~5/step in exploration (1-ED≈1, tilt≈1, wheel_speed≈1).
+    recovery_wheel_leg_coord = RewTerm(
+        func=mdp.recovery_wheel_leg_coord,
+        weight=5.0,
+        params={"asset_cfg": SceneEntityCfg("robot"), "max_wheel_speed": 40.0},
+    )
+
+    # ── Constant penalties (paper Table I) ──
     recovery_joint_velocity = RewTerm(
         func=mdp.recovery_joint_velocity,
-        weight=-1e-3,  # small: allow motion
+        weight=-2e-2,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_torques = RewTerm(
         func=mdp.recovery_torques,
-        weight=-1e-6,  # small
+        weight=-2.5e-5,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_joint_acceleration = RewTerm(
         func=mdp.recovery_joint_acceleration,
-        weight=0.0,  # keep disabled
+        weight=-2.5e-7,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_wheel_velocity = RewTerm(
         func=mdp.recovery_wheel_velocity,
-        weight=0.0,  # disabled
+        weight=-2e-2,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
@@ -159,7 +184,22 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
         self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
         self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
 
-        # ── Free-fall: zero joint commands for first 2s (paper Section III-A) ──
+        # ── Free-fall: zero torques for the first 2s (paper §III-A) ──
+        # TWO events are needed:
+        #   (a) mode="reset": zero actuator gains for just-reset envs
+        #       immediately — the interval event below does not fire at
+        #       t=0, it first fires at t=0.02s, so without this the PD
+        #       controller would produce one impulse-step of non-zero
+        #       torque at the perturbed initial pose.
+        #   (b) mode="interval": runs every control step to keep gains
+        #       zero (and PD target pinned to current joint_pos) while
+        #       step_count < FREEFALL_STEPS, then restores the cached
+        #       gains once each env exits free-fall.
+        self.events.freefall_zero_action_on_reset = EventTerm(
+            func=mdp.zero_action_freefall,
+            mode="reset",
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
         self.events.freefall_zero_action = EventTerm(
             func=mdp.zero_action_freefall,
             mode="interval",
@@ -169,11 +209,21 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
 
         # ── DR enabled (paper Section IV-A) ──
         # friction: base class default (0.3, 1.0) static, (0.3, 0.8) dynamic
-        # mass: disabled (class-based API incompatible)
-        self.events.randomize_rigid_body_mass_base = None
+        # mass: paper says ±10% on the base; re-enable via the standard
+        # isaaclab event (randomize_rigid_body_mass scales default mass).
+        from isaaclab.envs.mdp import randomize_rigid_body_mass
+        self.events.randomize_rigid_body_mass_base = EventTerm(
+            func=randomize_rigid_body_mass,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+                "mass_distribution_params": (0.9, 1.1),  # ±10% per paper IV-A
+                "operation": "scale",
+            },
+        )
         self.events.randomize_rigid_body_mass_others = None
-        # COM: base class default +/-5cm
-        # external_force: re-create (parent set to None)
+        # COM: base class default ±5 cm
+        # external_force: re-create (parent may have set None)
         from isaaclab.envs.mdp import apply_external_force_torque
         self.events.randomize_apply_external_force_torque = EventTerm(
             func=apply_external_force_torque,
@@ -184,25 +234,29 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
                 "torque_range": (-10.0, 10.0),
             },
         )
-        # actuator_gains: disabled (class-based API incompatible)
+        # actuator_gains: leave as inherited from base (we zero them per-env
+        # during free-fall, see zero_action_freefall); disabling the reset-time
+        # DR keeps the cached "original" gains meaningful.
         self.events.randomize_actuator_gains = None
-        # push_robot: base class default (push every 10-15s)
+        # push_robot: base class default (push every 10-15 s)
 
         # ── Wheel vel_scale < 1.0 for recovery (paper Section C) ──
         self.actions.joint_vel.scale = 0.8
 
-        # ── Single frame observations (matching paper Fig.3) ──
-        self.observations.policy.history_length = 1
-        self.observations.critic.history_length = 1
+        # ── Observation history: keep parent's setting ──
+        # Paper (IV): actor observes "current and historical readings with a
+        # time interval of 0.01 s". ThunderHist* base class already supplies
+        # the history stack; do NOT override to 1 (that was an earlier bug).
 
-        # Replace velocity_commands(useless for recovery) with base_lin_vel
+        # ── Observations: asymmetric actor-critic (paper Fig.3) ──
         from isaaclab.managers import ObservationTermCfg as ObsTerm
         from isaaclab.utils.noise import UniformNoiseCfg as Unoise
         import robot_lab.tasks.manager_based.locomotion.velocity.mdp as obs_mdp
 
-        # Remove velocity commands from actor obs
+        # Actor: onboard-realistic, noisy IMU + encoders only
+        # Remove velocity commands from actor (recovery has no cmd)
         self.observations.policy.velocity_commands = None
-        # Add body linear velocity (paper: IMU body linear velocity)
+        # Noisy body linear velocity (IMU approximation)
         self.observations.policy.base_lin_vel = ObsTerm(
             func=obs_mdp.base_lin_vel,
             noise=Unoise(n_min=-0.1, n_max=0.1),
@@ -210,9 +264,59 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
             scale=1.0,
         )
 
-        # Same for critic: replace cmd with lin_vel
+        # Critic: everything the actor has + privileged sim-only signals
         self.observations.critic.velocity_commands = None
-        # Critic already has base_lin_vel from base config
+        # Drop critic's inherited noisy base_lin_vel — we replace it with the
+        # clean privileged version below so the critic doesn't see the same
+        # field twice at different noise levels.
+        if hasattr(self.observations.critic, "base_lin_vel"):
+            self.observations.critic.base_lin_vel = None
+
+        # All priv_* obs use history_length=0 to avoid silently ballooning the
+        # critic dim if ThunderHist* applies a history stack to the critic
+        # group — privileged signals are instantaneous by construction.
+
+        # (1) Clean base linear/angular velocity (no IMU noise)
+        self.observations.critic.priv_base_lin_vel = ObsTerm(
+            func=mdp.priv_base_lin_vel_clean,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-100.0, 100.0),
+            scale=1.0,
+            history_length=0,
+        )
+        self.observations.critic.priv_base_ang_vel = ObsTerm(
+            func=mdp.priv_base_ang_vel_clean,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-100.0, 100.0),
+            scale=1.0,
+            history_length=0,
+        )
+        # (2) Base z-height — not observable from onboard sensors
+        self.observations.critic.priv_base_height = ObsTerm(
+            func=mdp.priv_base_height,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-5.0, 5.0),
+            scale=1.0,
+            history_length=0,
+        )
+        # (3) Foot contact binary state (support state signal)
+        self.observations.critic.priv_foot_contact = ObsTerm(
+            func=mdp.priv_foot_contact,
+            params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"),
+                    "threshold": 1.0},
+            clip=(0.0, 1.0),
+            scale=1.0,
+            history_length=0,
+        )
+        # (4) Body (shank/thigh/base) contact magnitude — collision state
+        self.observations.critic.priv_body_contact_force = ObsTerm(
+            func=mdp.priv_body_contact_force,
+            params={"sensor_cfg": SceneEntityCfg("contact_forces",
+                    body_names=["base_link", ".*thigh.*", ".*calf.*"])},
+            clip=(0.0, 500.0),
+            scale=0.01,
+            history_length=0,
+        )
 
         # ── Remove height scan observations ──
         if hasattr(self.observations, 'height_scan_group'):
