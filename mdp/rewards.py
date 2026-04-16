@@ -83,20 +83,30 @@ def _ensure_step_counter(env: ManagerBasedRLEnv) -> None:
         )
 
 
-def _get_joint_split(env: ManagerBasedRLEnv, asset: Articulation) -> tuple[torch.Tensor, torch.Tensor]:
+def _get_joint_split(
+    env: ManagerBasedRLEnv,
+    asset: Articulation,
+    wheel_joint_regex: str = ".*foot.*",
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Return (leg_ids, wheel_ids) as long tensors, cached on the env.
 
-    Resolves joint names matching `.*wheel.*` as wheels, the rest as legs.
-    Raises if either group is empty (misconfigured URDF or name regex).
+    On Thunder the wheel joints are named `<LEG>_foot_joint` (the foot link
+    is rigidly attached to the wheel, so the joint driving it carries the
+    `foot` suffix) — hence the default regex matches `.*foot.*`. Pass a
+    different regex if your URDF uses a different convention (e.g.
+    `.*wheel.*` for some Go2-W variants).
+
+    Everything not matched by `wheel_joint_regex` is treated as a leg joint.
+    Raises if either group is empty.
     """
     if not hasattr(env, "_recovery_joint_split"):
-        wheel_ids, _ = asset.find_joints(".*wheel.*")
+        wheel_ids, wheel_names = asset.find_joints(wheel_joint_regex)
         all_ids = list(range(asset.data.joint_pos.shape[1]))
         leg_ids = [i for i in all_ids if i not in wheel_ids]
         if not wheel_ids or not leg_ids:
             raise RuntimeError(
-                f"recovery: could not split joints by '.*wheel.*' regex. "
-                f"Got wheel_ids={wheel_ids}, leg_ids={leg_ids}. "
+                f"recovery: joint split failed with regex '{wheel_joint_regex}'. "
+                f"Got wheel_ids={wheel_ids} (names={wheel_names}), leg_ids={leg_ids}. "
                 f"Asset joint_names={asset.data.joint_names}."
             )
         device = asset.data.joint_pos.device
