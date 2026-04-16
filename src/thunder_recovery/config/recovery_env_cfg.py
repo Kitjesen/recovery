@@ -33,7 +33,7 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
@@ -83,6 +83,20 @@ class RecoverySceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/.*",
         history_length=3,
         track_air_time=False,
+    )
+
+    # Height scanner: privileged, critic-only. Centered 20 m above the base,
+    # ray-cast onto /World/ground. On the plane terrain used here the scan is
+    # flat, but keeping the sensor wired in means no code changes are needed
+    # when extending to rough terrain or benchmarking sim-to-real — the critic
+    # already consumes the signal.
+    height_scanner = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/" + BASE_LINK_NAME,
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        ray_alignment="yaw",
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=(1.6, 1.0)),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
     )
 
     sky_light = AssetBaseCfg(
@@ -231,6 +245,17 @@ class RecoveryObservationsCfg:
             params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=COLLISION_BODY_REGEXES)},
             clip=(0.0, 500.0),
             scale=0.01,
+            history_length=0,
+        )
+
+        # Ground-truth height scan below the base (critic only).
+        # actor is deployment-realistic and has no access to this signal;
+        # giving it to the critic stabilises value estimation — matches the
+        # asymmetric actor-critic design in the paper's Fig. 3.
+        height_scan = ObsTerm(
+            func=mdp_core.height_scan,
+            params={"sensor_cfg": SceneEntityCfg("height_scanner")},
+            clip=(-1.0, 1.0),
             history_length=0,
         )
 
