@@ -41,6 +41,15 @@ class RecoveryRewardsCfg:
         weight=1e-10,
     )
 
+    # Logging only: end-of-episode success indicator (paper criteria).
+    # Tiny weight guarantees the term is computed (some RewardManager versions
+    # skip weight=0). Effective training contribution ~0.
+    recovery_success_rate = RewTerm(
+        func=mdp.recovery_success_rate,
+        weight=1e-6,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+
     # ── Task rewards (×ED, paper Table I) ──
     recovery_stand_joint_pos = RewTerm(
         func=mdp.recovery_stand_joint_pos,
