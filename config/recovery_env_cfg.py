@@ -35,10 +35,14 @@ class RecoveryRewardsCfg:
     Just set weights here, env handles the rest.
     """
 
-    # Step counter (tiny weight — must be called every step for ED counter)
+    # Step counter: side-effect term that advances per-env _recovery_step_count
+    # every control step; ED reads this counter. Weight is tiny-but-nonzero so
+    # the reward manager is guaranteed to call it (1e-10 can be pruned in some
+    # Isaac Lab versions → ED would stay at 0 forever and training would go
+    # nowhere).
     recovery_step_counter = RewTerm(
         func=mdp.recovery_step_counter,
-        weight=1e-10,
+        weight=1e-6,
     )
 
     # Logging only: end-of-episode success indicator (paper criteria).
@@ -68,10 +72,18 @@ class RecoveryRewardsCfg:
     )
 
     # ── Behavior rewards (×CW, paper Table I) ──
+    # body_collision: raw sum ||F||² on thigh/calf/base. Without a clip the
+    # penalty can exceed -1k/step on high-impact contacts (||F||>300 N) and
+    # dominate gradients early on. force_clip=50 N bounds per-body contribution
+    # at 50²=2500; with CW≈0.3 × weight -5e-2 the worst-case penalty is
+    # ~O(-30)/step for 9 contacting bodies, comparable to other penalties.
     recovery_body_collision = RewTerm(
         func=mdp.recovery_body_collision,
         weight=-5e-2,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=["base_link", ".*thigh.*", ".*calf.*"])},
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["base_link", ".*thigh.*", ".*calf.*"]),
+            "force_clip": 50.0,
+        },
     )
     recovery_action_rate_legs = RewTerm(
         func=mdp.recovery_action_rate_legs,

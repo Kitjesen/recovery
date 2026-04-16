@@ -111,7 +111,12 @@ def _env_dt(env: ManagerBasedRLEnv) -> float:
     """Control-step duration (seconds). Uses env.step_dt when available."""
     if hasattr(env, "step_dt"):
         return float(env.step_dt)
-    if hasattr(env, "cfg") and hasattr(env.cfg, "sim") and hasattr(env.cfg, "decimation"):
+    if (
+        hasattr(env, "cfg")
+        and hasattr(env.cfg, "sim")
+        and hasattr(env.cfg.sim, "dt")
+        and hasattr(env.cfg, "decimation")
+    ):
         return float(env.cfg.sim.dt) * float(env.cfg.decimation)
     return 1.0 / 50.0
 
@@ -164,23 +169,24 @@ def _get_ed(env: ManagerBasedRLEnv, k: int = 3) -> torch.Tensor:
     return (t_sec / T_sec).clamp_(0.0, 1.0) ** k
 
 
-def _ed_max(env: ManagerBasedRLEnv, k: int = 3) -> float:
-    """Peak value of ED — always 1.0 with the normalized form."""
-    return 1.0
+# Number of env.step() calls per PPO rollout iteration. MUST match
+# `num_steps_per_env` in recovery_ppo_cfg.py — CW decay timing depends on
+# this ratio. Isaac Lab does not expose the PPO rollout length to the reward
+# manager, so we mirror the constant here.
+RECOVERY_STEPS_PER_ITER = 48
 
 
 def _get_cw(env: ManagerBasedRLEnv, beta: float = 0.3, decay: float = 0.968) -> float:
     """Curriculum Weight (paper Eq.3): CW(i) = beta · decay^i.
 
-    i = training iteration (rollout step counted once per policy update).
-    Approximated as common_step_counter / num_steps_per_env (48).
-    At beta=0.3, decay=0.968: CW drops to 0.1 around iter~35, to ~0.01 around iter~100.
-    So behavior penalties are strong in the first few dozen iterations, then fade as
-    the policy stabilises and the stricter task/ED shaping takes over.
+    i = training iteration, approximated as
+        common_step_counter / RECOVERY_STEPS_PER_ITER.
+    At beta=0.3, decay=0.968: CW=0.1 around iter 35, ~0.01 around iter 100.
+    Behavior penalties are strong for a few dozen iterations, then fade as
+    the policy stabilises and task/ED shaping takes over.
     """
-    steps_per_iter = 48
     if hasattr(env, "common_step_counter"):
-        iteration = env.common_step_counter / steps_per_iter
+        iteration = env.common_step_counter / RECOVERY_STEPS_PER_ITER
     else:
         iteration = 0
     return beta * (decay ** iteration)
@@ -316,11 +322,21 @@ def recovery_body_collision(
 
 def recovery_action_rate_legs(
     env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """sum((a_leg[t]-a_leg[t-1])²). Wheels excluded. Zero during free-fall."""
+    """CW · sum((a_leg[t] - a_leg[t-1])²) on leg action dims only.
+
+    Assumes the action manager layout matches the joint layout (first N
+    action dims correspond to leg joints). Thunder's action cfg is
+    joint_pos(legs) + joint_vel(wheels) concatenated in that order, which
+    makes `leg_ids` from _get_joint_split a valid slice into the action
+    tensor.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    leg_ids, _ = _get_joint_split(env, asset)
     action = env.action_manager.action
     prev_action = env.action_manager.prev_action
-    leg_diff = torch.sum(torch.square(action[:, :12] - prev_action[:, :12]), dim=1)
+    leg_diff = torch.sum(torch.square(action[:, leg_ids] - prev_action[:, leg_ids]), dim=1)
     return _get_cw(env) * leg_diff
 
 
@@ -677,12 +693,14 @@ def priv_body_contact_force(
     Tells the critic whether the robot is dragging limbs or hitting the ground
     with its body, which the actor cannot directly sense.
     """
+    if sensor_cfg.body_ids is None or sensor_cfg.body_ids == slice(None):
+        raise RuntimeError(
+            "priv_body_contact_force requires sensor_cfg.body_ids to be resolved "
+            "from a body_names regex; no safe index fallback exists."
+        )
     sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     forces = sensor.data.net_forces_w_history[:, 0, :, :]
-    magnitude = torch.norm(forces, dim=-1)
-    if sensor_cfg.body_ids is not None and sensor_cfg.body_ids != slice(None):
-        magnitude = magnitude[:, sensor_cfg.body_ids]
-    return magnitude
+    return torch.norm(forces, dim=-1)[:, sensor_cfg.body_ids]
 
 
 
