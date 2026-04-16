@@ -5,6 +5,33 @@
 
 Based on 'Learning to Recover' (arXiv:2506.05516) Eq.1-4 + Table I.
 
+Episode timeline (T = 5s, 50Hz, 250 steps):
+
+  ┌──────────────────┬─────────────────────┬──────────────────────┐
+  │ Free-fall        │ Exploration         │ Convergence          │
+  │ t ∈ [0, 2s]      │ t ∈ [2, 3.5s]       │ t ∈ [3.5, 5s]        │
+  │ steps 0-99       │ steps 100-174       │ steps 175-249        │
+  ├──────────────────┼─────────────────────┼──────────────────────┤
+  │ ED ≈ 0 → 1       │ ED ≈ 1 → 5          │ ED ≈ 5 → 15.6        │
+  │ action forced to │ policy output used  │ policy output used   │
+  │ default pose     │ (torques active)    │                      │
+  │ (zero_action_    │                     │                      │
+  │  freefall)       │                     │                      │
+  ├──────────────────┼─────────────────────┼──────────────────────┤
+  │ Policy actions   │ Task rewards weak;  │ Task rewards dominate│
+  │ ignored → zero   │ behavior penalties  │ → policy converges   │
+  │ gradient signal. │ (×CW) active; policy│ to precise standing  │
+  │ Purpose: generate│ freely explores     │ posture.             │
+  │ diverse fallen   │ flipping / wheel-   │                      │
+  │ initial states.  │ assisted recovery.  │                      │
+  └──────────────────┴─────────────────────┴──────────────────────┘
+
+Paper Section III-A: during free-fall, joint torques are set to 0 — the
+robot falls under gravity with a frozen standing pose. We implement this by
+writing (default joint pos, zero joint vel) to sim every step for envs whose
+step count < 100. The policy still emits actions but they are discarded by
+this override; no learning signal flows through the free-fall window.
+
 v11 (restore ED):
 - Task rewards (stand_joint_pos, base_height, base_orientation) are multiplied by ED.
 - Step counter advances via recovery_step_counter term (always called each step).
