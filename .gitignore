@@ -1,0 +1,33 @@
+# Claude Code runtime state
+.omc/
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Training artifacts
+logs/
+outputs/
+*.pt
+*.ckpt
+tensorboard/
+wandb/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
