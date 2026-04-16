@@ -241,21 +241,6 @@ wrong:
   multiplier range — this is the current API (≥ 2024) but older pins took
   it as an absolute kg range.
 
-## Commit history on this branch
-
-```
-eeb9bfd  fix: second audit pass — episode-boundary bugs
-82de95a  fix: wheel joint regex — Thunder URDF uses '.*foot.*'
-7ef7835  fix: 6 more shortcuts — step_counter weight, action_rate indices, CW coupling
-0f385dd  refactor: cross-check pass — paper-faithful support, history, mass DR
-fbdb861  refactor: full paper alignment — normalized ED, true torques=0
-763dba4  fix: legs-only penalties, success metric, dt not hardcoded
-3ecab63  feat: asymmetric actor-critic + wheel-leg coordination reward
-2bf68ff  docs: clarify episode timeline
-88d06d9  fix: restore ED shaping, realign weights with paper Table I
-c074c11  feat: fall recovery policy for wheeled-legged quadruped (initial)
-```
-
 ## References
 
 - Paper: [Learning to Recover (arXiv:2506.05516)](https://arxiv.org/abs/2506.05516)
