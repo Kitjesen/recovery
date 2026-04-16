@@ -184,7 +184,22 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
         self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
         self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
 
-        # ── Free-fall: zero joint commands for first 2s (paper Section III-A) ──
+        # ── Free-fall: zero torques for the first 2s (paper §III-A) ──
+        # TWO events are needed:
+        #   (a) mode="reset": zero actuator gains for just-reset envs
+        #       immediately — the interval event below does not fire at
+        #       t=0, it first fires at t=0.02s, so without this the PD
+        #       controller would produce one impulse-step of non-zero
+        #       torque at the perturbed initial pose.
+        #   (b) mode="interval": runs every control step to keep gains
+        #       zero (and PD target pinned to current joint_pos) while
+        #       step_count < FREEFALL_STEPS, then restores the cached
+        #       gains once each env exits free-fall.
+        self.events.freefall_zero_action_on_reset = EventTerm(
+            func=mdp.zero_action_freefall,
+            mode="reset",
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
         self.events.freefall_zero_action = EventTerm(
             func=mdp.zero_action_freefall,
             mode="interval",
@@ -257,18 +272,24 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
         if hasattr(self.observations.critic, "base_lin_vel"):
             self.observations.critic.base_lin_vel = None
 
+        # All priv_* obs use history_length=0 to avoid silently ballooning the
+        # critic dim if ThunderHist* applies a history stack to the critic
+        # group — privileged signals are instantaneous by construction.
+
         # (1) Clean base linear/angular velocity (no IMU noise)
         self.observations.critic.priv_base_lin_vel = ObsTerm(
             func=mdp.priv_base_lin_vel_clean,
             params={"asset_cfg": SceneEntityCfg("robot")},
             clip=(-100.0, 100.0),
             scale=1.0,
+            history_length=0,
         )
         self.observations.critic.priv_base_ang_vel = ObsTerm(
             func=mdp.priv_base_ang_vel_clean,
             params={"asset_cfg": SceneEntityCfg("robot")},
             clip=(-100.0, 100.0),
             scale=1.0,
+            history_length=0,
         )
         # (2) Base z-height — not observable from onboard sensors
         self.observations.critic.priv_base_height = ObsTerm(
@@ -276,6 +297,7 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
             params={"asset_cfg": SceneEntityCfg("robot")},
             clip=(-5.0, 5.0),
             scale=1.0,
+            history_length=0,
         )
         # (3) Foot contact binary state (support state signal)
         self.observations.critic.priv_foot_contact = ObsTerm(
@@ -284,6 +306,7 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
                     "threshold": 1.0},
             clip=(0.0, 1.0),
             scale=1.0,
+            history_length=0,
         )
         # (4) Body (shank/thigh/base) contact magnitude — collision state
         self.observations.critic.priv_body_contact_force = ObsTerm(
@@ -292,6 +315,7 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
                     body_names=["base_link", ".*thigh.*", ".*calf.*"])},
             clip=(0.0, 500.0),
             scale=0.01,
+            history_length=0,
         )
 
         # ── Remove height scan observations ──

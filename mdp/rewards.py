@@ -140,10 +140,12 @@ def _is_freefall(env: ManagerBasedRLEnv) -> torch.Tensor:
 def _advance_step_counter(env: ManagerBasedRLEnv) -> None:
     """Increment per-env step counter exactly once per env.step().
 
-    Called from `recovery_step_counter` (weight 1e-10) which is guaranteed to
-    run every step. Reset is handled in `reset_with_freefall`. Counter is
-    clamped to `max_episode_length` so ED never exceeds 1.0 even if a reward
-    term reads the counter after the final step of an episode.
+    Called from `recovery_step_counter` (weight 1e-6) which the reward
+    manager guarantees to run every step. Reset sets the counter to -1 so
+    the first post-reset advance brings it to 0 — reward terms read
+    count ∈ {0, 1, …, T-1} over an episode, which makes `_is_freefall`
+    (< FREEFALL_STEPS) cover exactly 100 steps and ED reach exactly 1.0 at
+    the final step.
     """
     _ensure_step_counter(env)
     if not hasattr(env, "_recovery_ed_last_step"):
@@ -152,7 +154,7 @@ def _advance_step_counter(env: ManagerBasedRLEnv) -> None:
     current_step = env.common_step_counter if hasattr(env, "common_step_counter") else 0
     if current_step != env._recovery_ed_last_step:
         env._recovery_step_count += 1
-        env._recovery_step_count.clamp_(max=int(env.max_episode_length))
+        env._recovery_step_count.clamp_(max=int(env.max_episode_length) - 1)
         env._recovery_ed_last_step = current_step
 
 
@@ -209,8 +211,10 @@ def recovery_step_counter(
 ) -> torch.Tensor:
     """Advances the per-env ED step counter. Must always run each step.
 
-    Return is zero; real side effect is the counter increment. Weight is 1e-10
-    in the env cfg so it does not affect the optimization loss.
+    Return is zero; real side effect is the counter increment. Weight is 1e-6
+    in the env cfg (tiny-but-nonzero — avoids reward-manager pruning seen at
+    exactly 0.0 or ≤1e-9 in some Isaac Lab releases) so it does not
+    meaningfully affect the optimisation loss.
     """
     _advance_step_counter(env)
     return torch.zeros(env.num_envs, device=env.device)
@@ -485,10 +489,26 @@ def reset_with_freefall(
     # Perturb only leg joints for pose diversity; wheels start at default.
     noise = (torch.rand_like(joint_pos[:, leg_ids]) * 2.0 - 1.0) * leg_joint_pos_noise
     joint_pos[:, leg_ids] = joint_pos[:, leg_ids] + noise
+    # Clamp to soft joint limits so PhysX doesn't clamp on first step and
+    # produce an impulse spike that would contaminate joint_vel / torques.
+    soft_limits = asset.data.soft_joint_pos_limits[env_ids]
+    joint_pos = torch.clamp(joint_pos, min=soft_limits[..., 0], max=soft_limits[..., 1])
     asset.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
 
+    # Reset step counter to -1 so the first _advance_step_counter call (via
+    # recovery_step_counter) brings it to 0. This makes free-fall exactly
+    # FREEFALL_STEPS (100) steps and ED reach 1.0 at the final step.
     _ensure_step_counter(env)
-    env._recovery_step_count[env_ids] = 0
+    env._recovery_step_count[env_ids] = -1
+
+    # Zero the action manager's prev_action for these envs — otherwise
+    # recovery_action_rate_legs on the first post-reset step computes
+    # (fresh_action - last_action_of_previous_episode)² and logs a
+    # systematic spike at every episode boundary.
+    if hasattr(env, "action_manager"):
+        prev_action = getattr(env.action_manager, "prev_action", None)
+        if torch.is_tensor(prev_action):
+            prev_action[env_ids] = 0.0
 
 
 # ── Success checker ──
