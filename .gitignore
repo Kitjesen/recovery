@@ -1,33 +1,29 @@
-# Claude Code runtime state
-.omc/
-.claude/
-
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
 *.egg-info/
+*.egg
+.Python
+build/
+dist/
 .pytest_cache/
-.mypy_cache/
 .ruff_cache/
 
-# Virtual envs
-.venv/
-venv/
-env/
+# Editable install marker
+*.pth
 
-# Training artifacts
+# Training outputs (kept outside repo)
 logs/
 outputs/
-*.pt
-*.ckpt
-tensorboard/
-wandb/
+runs/
+/tmp/
 
-# Editor
+# IDE
 .vscode/
 .idea/
 *.swp
+
+# OS
 .DS_Store
+Thumbs.db
