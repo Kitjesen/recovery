@@ -78,17 +78,21 @@ class RecoveryRewardsCfg:
         weight=-1e-2,
     )
 
-    # ── Support state (paper Section E, auxiliary shaping) ──
+    # ── Support state (paper Section E, event-triggered milestone) ──
+    # One-shot bonus on first 0→1 transition per episode. Weight tuned as a
+    # meaningful milestone carrot against task rewards (peak ≈212/step at ED=1):
+    # 50 ≈ one quarter-second of ED-peak task reward.
     recovery_support_state = RewTerm(
         func=mdp.recovery_support_state,
-        weight=5.0,
+        weight=50.0,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"), "threshold": 1.0},
     )
 
     # ── Wheel-leg coordination (paper core contribution, early-phase only) ──
+    # Max ~5/step in exploration (1-ED≈1, tilt≈1, wheel_speed≈1).
     recovery_wheel_leg_coord = RewTerm(
         func=mdp.recovery_wheel_leg_coord,
-        weight=2.0,
+        weight=5.0,
         params={"asset_cfg": SceneEntityCfg("robot"), "max_wheel_speed": 40.0},
     )
 

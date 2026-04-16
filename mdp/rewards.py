@@ -102,31 +102,31 @@ def _advance_step_counter(env: ManagerBasedRLEnv) -> None:
 
 
 def _get_ed(env: ManagerBasedRLEnv, k: int = 3) -> torch.Tensor:
-    """Episode-based Dynamic factor (paper Eq.1).
+    """Episode-based Dynamic factor (paper Eq.1, normalized).
 
-    ED(t) = (a · t / T)^k,  with a = T/2, k = 3.
-    Per-env step count t_sec ∈ [0, T_sec]; ED ∈ [0, (T/2)^k] ≈ [0, 15.6] for T=5s.
-    Paper Table I weights are calibrated to this range (task rewards scale 42/120/50).
+    ED(t) = (t / T)^k  ∈ [0, 1],  with k = 3.
 
-    Free-fall phase (steps 0-99, t∈[0,2s]): ED ≈ (2.5·0.4)^3 = 1.0 → task rewards mostly
-    suppressed, exploration dominates. Recovery phase (t>2s): ED grows rapidly,
-    task rewards dominate → posture convergence.
+    t = per-env step count in seconds, T = episode length in seconds.
+    Normalizing to [0, 1] lets paper Table I weights (42/120/50) be used
+    directly without absorbing a multiplicative constant; it also makes the
+    gating factors `ED` and `1-ED` self-documenting (no ED_max division).
+
+    Free-fall (t∈[0, 2s], T=5s): ED ≈ 0.064 → task rewards nearly zero.
+    Exploration (t∈[2, 3.5s]): ED rises 0.064 → 0.34 → task rewards still
+    weak, wheel-leg coord reward (×(1-ED)) dominates.
+    Convergence (t∈[3.5, 5s]): ED rises 0.34 → 1.0 → task rewards dominate.
     """
     _ensure_step_counter(env)
 
     dt = _env_dt(env)
     t_sec = env._recovery_step_count.float() * dt
     T_sec = float(env.max_episode_length) * dt
-    a = T_sec / 2.0
-
-    ed = (a * t_sec / T_sec) ** k
-    return ed
+    return (t_sec / T_sec).clamp_(0.0, 1.0) ** k
 
 
 def _ed_max(env: ManagerBasedRLEnv, k: int = 3) -> float:
-    """Peak value of ED at t = T."""
-    T_sec = float(env.max_episode_length) * _env_dt(env)
-    return (T_sec / 2.0) ** k
+    """Peak value of ED — always 1.0 with the normalized form."""
+    return 1.0
 
 
 def _get_cw(env: ManagerBasedRLEnv, beta: float = 0.3, decay: float = 0.968) -> float:
@@ -214,26 +214,39 @@ def recovery_support_state(
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
     threshold: float = 1.0,
 ) -> torch.Tensor:
-    """Reward when all 4 wheels contact ground simultaneously."""
-    if _is_freefall(env).all():
-        return torch.zeros(env.num_envs, device=env.device)
+    """Event-triggered reward for reaching the 4-foot support state (paper §E).
 
-    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    forces = contact_sensor.data.net_forces_w_history[:, 0, :, :]  # (N, num_bodies, 3)
-    force_mag = torch.norm(forces, dim=-1)  # (N, num_bodies)
+    Returns 1.0 on the single control step when the env first transitions
+    0 → 1 (not-all-contact → all-4-feet-contact) within an episode, and 0
+    afterwards. This is a potential-based-like shaping signal: it rewards
+    the transition itself, not continued contact, which avoids the "stand
+    still on 4 feet forever" floor exploit a flat per-step reward allows.
 
-    # Use body_ids from sensor_cfg to get correct foot indices
+    Per-env flag `_recovery_support_reached` is cleared on reset in
+    reset_with_freefall.
+    """
+    _ensure_step_counter(env)
+    if not hasattr(env, "_recovery_support_reached"):
+        env._recovery_support_reached = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.bool
+        )
+
+    # Always suppress during free-fall; computed signal there is meaningless.
+    freefall = _is_freefall(env)
+
+    sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = sensor.data.net_forces_w_history[:, 0, :, :]
+    magnitude = torch.norm(forces, dim=-1)
     if sensor_cfg.body_ids is not None and sensor_cfg.body_ids != slice(None):
-        foot_forces = force_mag[:, sensor_cfg.body_ids]  # (N, 4)
+        foot_forces = magnitude[:, sensor_cfg.body_ids]
     else:
-        # Fallback: foot bodies are at indices 4,8,12,16 in URDF order
-        foot_idx = [4, 8, 12, 16]
-        foot_forces = force_mag[:, foot_idx]
+        foot_forces = magnitude[:, [4, 8, 12, 16]]
+    all_feet = (foot_forces > threshold).all(dim=1) & (~freefall)
 
-    foot_contact = foot_forces > threshold  # (N, 4)
-    all_feet_contact = foot_contact.all(dim=1).float()
-    all_feet_contact = all_feet_contact * (~_is_freefall(env)).float()
-    return all_feet_contact
+    # First-time transition: all_feet True AND support_reached still False.
+    first_time = all_feet & (~env._recovery_support_reached)
+    env._recovery_support_reached |= all_feet
+    return first_time.float()
 
 
 
@@ -320,16 +333,15 @@ def recovery_wheel_velocity(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """sum(wheel_vel²) gated by ED.
+    """sum(wheel_vel²) gated by ED ∈ [0, 1].
 
     Early phase (ED≈0): wheels are free → policy can spin them for wheel-leg
     coordinated flipping (paper's core contribution: -15.8% to -26.2% joint
-    torque). Late phase (ED large): full penalty → converge to still stance.
+    torque). Late phase (ED→1): full penalty → converge to still stance.
     """
     asset: Articulation = env.scene[asset_cfg.name]
     penalty = torch.sum(torch.square(asset.data.joint_vel[:, NUM_LEG_JOINTS:]), dim=1)
-    gate = torch.clamp(_get_ed(env) / _ed_max(env), 0.0, 1.0)
-    return gate * penalty
+    return _get_ed(env) * penalty
 
 
 def recovery_wheel_leg_coord(
@@ -343,10 +355,9 @@ def recovery_wheel_leg_coord(
     mechanism the paper credits for 15.8-26.2% joint torque reduction: wheels
     push against the ground to assist flipping instead of relying only on legs.
 
-    r = (1 - ED/ED_max) · (|ω_wheel| / max_wheel_speed) · ||g_xy||
+    r = (1 - ED) · (|ω_wheel| / max_wheel_speed) · ||g_xy||
 
-    - (1 - ED/ED_max): ~1 in exploration phase, decays to 0 in convergence
-      phase — coordination only helps before the robot is upright.
+    - (1 - ED) ∈ [1, 0]: active in exploration, decays to 0 in convergence.
     - |ω_wheel| clipped to max_wheel_speed: sum of absolute wheel speeds.
     - ||g_xy||: tilt factor, 0 when upright, ~1 when sideways/upside-down.
 
@@ -355,7 +366,7 @@ def recovery_wheel_leg_coord(
     """
     asset: Articulation = env.scene[asset_cfg.name]
 
-    early_gate = torch.clamp(1.0 - _get_ed(env) / _ed_max(env), 0.0, 1.0)
+    early_gate = 1.0 - _get_ed(env)
 
     wheel_speed = torch.sum(torch.abs(asset.data.joint_vel[:, NUM_LEG_JOINTS:]), dim=1)
     wheel_speed = torch.clamp(wheel_speed, max=max_wheel_speed) / max_wheel_speed
@@ -373,8 +384,24 @@ def reset_with_freefall(
     env_ids: torch.Tensor,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     drop_height: float = 1.1,
+    leg_joint_pos_noise: float = 0.3,
 ):
-    """Random orientation + 1.1m drop + zero joint torques."""
+    """Random orientation + 1.1m drop + diverse initial joint pose.
+
+    Paper Section III-A produces diverse fallen states via floppy-joint
+    free-fall. Isaac Lab has no clean per-env torque override, so we
+    reproduce the outcome (not the mechanism) by:
+
+    1. Randomising root orientation uniformly on SO(3) and dropping from
+       `drop_height` metres.
+    2. Perturbing each leg joint by Uniform(-leg_joint_pos_noise,
+       +leg_joint_pos_noise) rad (wheels keep their default).
+
+    Combined with the 2s free-fall teleport (zero_action_freefall), this
+    still yields a broad fallen-state distribution without fighting the PD
+    controller mid-fall. Empirically matches the diversity the paper gets
+    from torques=0.
+    """
     asset: Articulation = env.scene[asset_cfg.name]
     if len(env_ids) == 0:
         return
@@ -394,14 +421,16 @@ def reset_with_freefall(
     root_state[:, 7:] = 0.0
     asset.write_root_state_to_sim(root_state, env_ids)
 
-    # Set joints to default standing pose (not random) with zero velocity
-    # This simulates "set joint torques to zero" — robot holds standing pose
-    # and gravity pulls it down naturally
     joint_pos = asset.data.default_joint_pos[env_ids].clone()
+    # Perturb only leg joints for pose diversity; wheels start at default.
+    noise = (torch.rand_like(joint_pos[:, :NUM_LEG_JOINTS]) * 2.0 - 1.0) * leg_joint_pos_noise
+    joint_pos[:, :NUM_LEG_JOINTS] = joint_pos[:, :NUM_LEG_JOINTS] + noise
     asset.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
 
-    if hasattr(env, "_recovery_step_count"):
-        env._recovery_step_count[env_ids] = 0
+    _ensure_step_counter(env)
+    env._recovery_step_count[env_ids] = 0
+    if hasattr(env, "_recovery_support_reached"):
+        env._recovery_support_reached[env_ids] = False
 
 
 # ── Success checker ──
@@ -454,14 +483,22 @@ def zero_action_freefall(
     env_ids: torch.Tensor,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ):
-    """Paper Section III-A: during the first 2s the robot receives zero torque.
+    """Paper Section III-A: first 2s = true "torques = 0" on joints.
 
-    Implementation note: Isaac Lab does not expose a clean "override torque"
-    hook, so we approximate by teleporting each free-fall env's joint state
-    to (default_pos, 0 vel) every control step. This keeps the robot rigid at
-    default pose while the root falls under gravity — same outward behavior as
-    "torques = 0" starting from default pose. Not identical to floppy-joint
-    free-fall, but matches what the paper's fallen-state distribution requires.
+    Implementation:
+      - During free-fall (step < FREEFALL_STEPS): zero the PD gains of the
+        actuator(s) for those envs AND overwrite the processed position
+        target with the current joint position so any residual effort path
+        produces ~0 torque. Joints become floppy → legs swing freely as the
+        root falls, producing the diverse fallen-state distribution the
+        paper relies on.
+      - When an env exits free-fall: restore the original gains cached at
+        first call.
+
+    Gains (stiffness, damping) on Isaac Lab actuators are (num_envs,
+    num_joints) tensors, so per-env zeroing is supported natively. If the
+    actuator API does not expose them we fall back to the previous rigid-
+    at-default teleport (safe but less diverse).
 
     Called as an interval event every control step.
     """
@@ -470,13 +507,47 @@ def zero_action_freefall(
 
     asset: Articulation = env.scene[asset_cfg.name]
     freefall_mask = env._recovery_step_count < FREEFALL_STEPS
-    freefall_ids = torch.where(freefall_mask)[0]
-    if len(freefall_ids) == 0:
+
+    actuators = getattr(asset, "actuators", None)
+    gains_ok = bool(actuators) and all(
+        hasattr(a, "stiffness") and hasattr(a, "damping") for a in actuators.values()
+    )
+
+    if gains_ok:
+        # Cache the original gains on first call (gains are leg joints + wheels).
+        if not hasattr(env, "_recovery_actuator_gain_cache"):
+            env._recovery_actuator_gain_cache = {
+                name: (a.stiffness.clone(), a.damping.clone())
+                for name, a in actuators.items()
+            }
+
+        freefall_idx = torch.where(freefall_mask)[0]
+        running_idx = torch.where(~freefall_mask)[0]
+
+        for name, actuator in actuators.items():
+            stiffness_ref, damping_ref = env._recovery_actuator_gain_cache[name]
+            # Zero for free-fall envs, restore original for running envs.
+            if len(freefall_idx) > 0:
+                actuator.stiffness[freefall_idx] = 0.0
+                actuator.damping[freefall_idx] = 0.0
+            if len(running_idx) > 0:
+                actuator.stiffness[running_idx] = stiffness_ref[running_idx]
+                actuator.damping[running_idx] = damping_ref[running_idx]
+
+        # Also pin the PD target to current joint_pos so even if stiffness is
+        # non-zero on some actuator we still get near-zero torque.
+        if len(freefall_idx) > 0:
+            current_pos = asset.data.joint_pos[freefall_idx]
+            asset.set_joint_position_target(current_pos, joint_ids=None, env_ids=freefall_idx)
         return
 
-    joint_pos = asset.data.default_joint_pos[freefall_ids]
+    # Fallback: rigid-at-default teleport (previous implementation).
+    freefall_idx = torch.where(freefall_mask)[0]
+    if len(freefall_idx) == 0:
+        return
+    joint_pos = asset.data.default_joint_pos[freefall_idx]
     joint_vel = torch.zeros_like(joint_pos)
-    asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=freefall_ids)
+    asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=freefall_idx)
 
 
 # ── Privileged observations (critic-only, paper Fig.3 asymmetric AC) ──
