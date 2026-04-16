@@ -78,13 +78,13 @@ class RecoveryRewardsCfg:
         weight=-1e-2,
     )
 
-    # ── Support state (paper Section E, event-triggered milestone) ──
-    # One-shot bonus on first 0→1 transition per episode. Weight tuned as a
-    # meaningful milestone carrot against task rewards (peak ≈212/step at ED=1):
-    # 50 ≈ one quarter-second of ED-peak task reward.
+    # ── Support state (paper §E, per-step binary) ──
+    # Paper verbatim: "a reward for the support state, defined as the
+    # condition where all four wheels are in contact with the ground
+    # simultaneously." → state-conditional, awarded each step support holds.
     recovery_support_state = RewTerm(
         func=mdp.recovery_support_state,
-        weight=50.0,
+        weight=5.0,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"), "threshold": 1.0},
     )
 
@@ -182,11 +182,21 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
 
         # ── DR enabled (paper Section IV-A) ──
         # friction: base class default (0.3, 1.0) static, (0.3, 0.8) dynamic
-        # mass: disabled (class-based API incompatible)
-        self.events.randomize_rigid_body_mass_base = None
+        # mass: paper says ±10% on the base; re-enable via the standard
+        # isaaclab event (randomize_rigid_body_mass scales default mass).
+        from isaaclab.envs.mdp import randomize_rigid_body_mass
+        self.events.randomize_rigid_body_mass_base = EventTerm(
+            func=randomize_rigid_body_mass,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+                "mass_distribution_params": (0.9, 1.1),  # ±10% per paper IV-A
+                "operation": "scale",
+            },
+        )
         self.events.randomize_rigid_body_mass_others = None
-        # COM: base class default +/-5cm
-        # external_force: re-create (parent set to None)
+        # COM: base class default ±5 cm
+        # external_force: re-create (parent may have set None)
         from isaaclab.envs.mdp import apply_external_force_torque
         self.events.randomize_apply_external_force_torque = EventTerm(
             func=apply_external_force_torque,
@@ -197,16 +207,19 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
                 "torque_range": (-10.0, 10.0),
             },
         )
-        # actuator_gains: disabled (class-based API incompatible)
+        # actuator_gains: leave as inherited from base (we zero them per-env
+        # during free-fall, see zero_action_freefall); disabling the reset-time
+        # DR keeps the cached "original" gains meaningful.
         self.events.randomize_actuator_gains = None
-        # push_robot: base class default (push every 10-15s)
+        # push_robot: base class default (push every 10-15 s)
 
         # ── Wheel vel_scale < 1.0 for recovery (paper Section C) ──
         self.actions.joint_vel.scale = 0.8
 
-        # ── Single frame observations (matching paper Fig.3) ──
-        self.observations.policy.history_length = 1
-        self.observations.critic.history_length = 1
+        # ── Observation history: keep parent's setting ──
+        # Paper (IV): actor observes "current and historical readings with a
+        # time interval of 0.01 s". ThunderHist* base class already supplies
+        # the history stack; do NOT override to 1 (that was an earlier bug).
 
         # ── Observations: asymmetric actor-critic (paper Fig.3) ──
         from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -226,6 +239,11 @@ class ThunderRecoveryEnvCfg(ThunderHistRoughEnvCfg):
 
         # Critic: everything the actor has + privileged sim-only signals
         self.observations.critic.velocity_commands = None
+        # Drop critic's inherited noisy base_lin_vel — we replace it with the
+        # clean privileged version below so the critic doesn't see the same
+        # field twice at different noise levels.
+        if hasattr(self.observations.critic, "base_lin_vel"):
+            self.observations.critic.base_lin_vel = None
 
         # (1) Clean base linear/angular velocity (no IMU noise)
         self.observations.critic.priv_base_lin_vel = ObsTerm(

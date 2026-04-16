@@ -1,44 +1,54 @@
 # Copyright (c) 2026 Qiongpei Technology
 # SPDX-License-Identifier: Apache-2.0
 
-"""Recovery reward functions — matches paper exactly.
+"""Recovery reward functions — full paper alignment.
 
-Based on 'Learning to Recover' (arXiv:2506.05516) Eq.1-4 + Table I.
+Based on 'Learning to Recover: Dynamic Reward Shaping with Wheel-Leg
+Coordination for Fallen Robots' (arXiv:2506.05516).
 
-Episode timeline (T = 5s, 50Hz, 250 steps):
+Episode timeline (T = 5s, 50 Hz, 250 steps):
 
   ┌──────────────────┬─────────────────────┬──────────────────────┐
   │ Free-fall        │ Exploration         │ Convergence          │
-  │ t ∈ [0, 2s]      │ t ∈ [2, 3.5s]       │ t ∈ [3.5, 5s]        │
-  │ steps 0-99       │ steps 100-174       │ steps 175-249        │
+  │ t ∈ [0, 2s]      │ t ∈ [2, ~3.5s]      │ t ∈ [~3.5, 5s]       │
+  │ steps 0-99       │ steps 100-~175      │ steps ~175-249       │
   ├──────────────────┼─────────────────────┼──────────────────────┤
-  │ ED ≈ 0 → 1       │ ED ≈ 1 → 5          │ ED ≈ 5 → 15.6        │
-  │ action forced to │ policy output used  │ policy output used   │
-  │ default pose     │ (torques active)    │                      │
-  │ (zero_action_    │                     │                      │
-  │  freefall)       │                     │                      │
+  │ ED ≈ 0 → 0.064   │ ED ≈ 0.064 → 0.34   │ ED ≈ 0.34 → 1.0      │
+  │ actuator gains 0 │ policy output used  │ policy output used   │
+  │ joints floppy    │ (torques active)    │                      │
+  │ (true torques=0) │                     │                      │
   ├──────────────────┼─────────────────────┼──────────────────────┤
-  │ Policy actions   │ Task rewards weak;  │ Task rewards dominate│
-  │ ignored → zero   │ behavior penalties  │ → policy converges   │
-  │ gradient signal. │ (×CW) active; policy│ to precise standing  │
-  │ Purpose: generate│ freely explores     │ posture.             │
-  │ diverse fallen   │ flipping / wheel-   │                      │
-  │ initial states.  │ assisted recovery.  │                      │
+  │ Diverse fallen   │ Task rewards weak;  │ Task rewards dominate│
+  │ states emerge:   │ wheel-leg coord     │ → policy converges   │
+  │ reset noise +    │ reward (×(1-ED)·    │ to precise standing  │
+  │ floppy-joint     │ tilt) drives wheel- │ posture.             │
+  │ free-fall.       │ assisted flipping.  │                      │
   └──────────────────┴─────────────────────┴──────────────────────┘
 
-Paper Section III-A: during free-fall, joint torques are set to 0 — the
-robot falls under gravity with a frozen standing pose. We implement this by
-writing (default joint pos, zero joint vel) to sim every step for envs whose
-step count < 100. The policy still emits actions but they are discarded by
-this override; no learning signal flows through the free-fall window.
+ED(t)  = (t/T)^3   ∈ [0, 1]   — paper Eq. 1, normalised.
+CW(i)  = β · decay^i  with β=0.3, decay=0.968  — paper Eq. 3, iter-indexed.
 
-v11 (restore ED):
-- Task rewards (stand_joint_pos, base_height, base_orientation) are multiplied by ED.
-- Step counter advances via recovery_step_counter term (always called each step).
-- Removed `recovery_upward` (bypassed ED, encouraged lazy flip-only policy).
-- Removed feet_ratio gating on base_height (ED handles the exploration phase).
-- Restored paper Table I weights in env cfg.
-- CW decay rebased on training iterations.
+Free-fall (Section III-A): paper verbatim "randomly initializing the
+robot's base orientation and joint angles, setting the joint torques to
+zero, and letting the robot free-fall from a height of 1.1 m for 2
+seconds". We reproduce this by:
+  - reset_with_freefall: random SO(3) orientation, 1.1 m drop, ±0.3 rad
+    uniform perturbation on leg joints.
+  - zero_action_freefall: for each env with step < 100, zero the per-env
+    actuator stiffness/damping and pin the PD target to the current
+    joint_pos so effective torque is 0. Cached gains are restored when
+    the env exits free-fall. Falls back to a rigid-at-default teleport
+    if the actuator class does not expose mutable per-env gain tensors.
+
+Support state (Section E): paper verbatim "a reward for the support
+state, defined as the condition where all four wheels are in contact
+with the ground simultaneously". Per-step binary reward.
+
+Wheel-leg coordination (paper core contribution, -15.8% to -26.2% joint
+torque reduction): encouraged via recovery_wheel_leg_coord (positive
+reward when wheels spin while body is tilted, active only in the
+exploration phase) and by ED-gating the wheel velocity penalty so wheels
+are free to assist flipping before the convergence phase.
 """
 
 from __future__ import annotations
@@ -57,7 +67,10 @@ if TYPE_CHECKING:
 
 # ── Constants ──
 FREEFALL_STEPS = 100  # 2s at 50Hz
-NUM_LEG_JOINTS = 12   # first 12 joints are legs, last 4 are wheels (Thunder layout)
+
+# Joint index resolution: DO NOT hardcode leg/wheel split. Thunder has 16
+# joints but the URDF order is not guaranteed to be legs-first. We cache the
+# resolved indices on the env the first time a reward needs them.
 
 
 # ── Helpers ──
@@ -68,6 +81,30 @@ def _ensure_step_counter(env: ManagerBasedRLEnv) -> None:
         env._recovery_step_count = torch.zeros(
             env.num_envs, device=env.device, dtype=torch.long
         )
+
+
+def _get_joint_split(env: ManagerBasedRLEnv, asset: Articulation) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return (leg_ids, wheel_ids) as long tensors, cached on the env.
+
+    Resolves joint names matching `.*wheel.*` as wheels, the rest as legs.
+    Raises if either group is empty (misconfigured URDF or name regex).
+    """
+    if not hasattr(env, "_recovery_joint_split"):
+        wheel_ids, _ = asset.find_joints(".*wheel.*")
+        all_ids = list(range(asset.data.joint_pos.shape[1]))
+        leg_ids = [i for i in all_ids if i not in wheel_ids]
+        if not wheel_ids or not leg_ids:
+            raise RuntimeError(
+                f"recovery: could not split joints by '.*wheel.*' regex. "
+                f"Got wheel_ids={wheel_ids}, leg_ids={leg_ids}. "
+                f"Asset joint_names={asset.data.joint_names}."
+            )
+        device = asset.data.joint_pos.device
+        env._recovery_joint_split = (
+            torch.tensor(leg_ids, dtype=torch.long, device=device),
+            torch.tensor(wheel_ids, dtype=torch.long, device=device),
+        )
+    return env._recovery_joint_split
 
 
 def _env_dt(env: ManagerBasedRLEnv) -> float:
@@ -89,7 +126,9 @@ def _advance_step_counter(env: ManagerBasedRLEnv) -> None:
     """Increment per-env step counter exactly once per env.step().
 
     Called from `recovery_step_counter` (weight 1e-10) which is guaranteed to
-    run every step. Reset is handled in `reset_with_freefall`.
+    run every step. Reset is handled in `reset_with_freefall`. Counter is
+    clamped to `max_episode_length` so ED never exceeds 1.0 even if a reward
+    term reads the counter after the final step of an episode.
     """
     _ensure_step_counter(env)
     if not hasattr(env, "_recovery_ed_last_step"):
@@ -98,6 +137,7 @@ def _advance_step_counter(env: ManagerBasedRLEnv) -> None:
     current_step = env.common_step_counter if hasattr(env, "common_step_counter") else 0
     if current_step != env._recovery_ed_last_step:
         env._recovery_step_count += 1
+        env._recovery_step_count.clamp_(max=int(env.max_episode_length))
         env._recovery_ed_last_step = current_step
 
 
@@ -214,39 +254,28 @@ def recovery_support_state(
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
     threshold: float = 1.0,
 ) -> torch.Tensor:
-    """Event-triggered reward for reaching the 4-foot support state (paper §E).
+    """Per-step binary reward for the 4-foot support state (paper §E).
 
-    Returns 1.0 on the single control step when the env first transitions
-    0 → 1 (not-all-contact → all-4-feet-contact) within an episode, and 0
-    afterwards. This is a potential-based-like shaping signal: it rewards
-    the transition itself, not continued contact, which avoids the "stand
-    still on 4 feet forever" floor exploit a flat per-step reward allows.
+    Paper (verbatim snippet): "a reward for the support state, defined as
+    the condition where all four wheels are in contact with the ground
+    simultaneously." → state-conditional, not event-triggered.
 
-    Per-env flag `_recovery_support_reached` is cleared on reset in
-    reset_with_freefall.
+    Returns 1.0 while all four feet contact the ground, 0 otherwise.
+    Suppressed during free-fall (the signal is meaningless while falling).
     """
-    _ensure_step_counter(env)
-    if not hasattr(env, "_recovery_support_reached"):
-        env._recovery_support_reached = torch.zeros(
-            env.num_envs, device=env.device, dtype=torch.bool
-        )
-
-    # Always suppress during free-fall; computed signal there is meaningless.
     freefall = _is_freefall(env)
 
     sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     forces = sensor.data.net_forces_w_history[:, 0, :, :]
     magnitude = torch.norm(forces, dim=-1)
-    if sensor_cfg.body_ids is not None and sensor_cfg.body_ids != slice(None):
-        foot_forces = magnitude[:, sensor_cfg.body_ids]
-    else:
-        foot_forces = magnitude[:, [4, 8, 12, 16]]
+    if sensor_cfg.body_ids is None or sensor_cfg.body_ids == slice(None):
+        raise RuntimeError(
+            "recovery_support_state requires sensor_cfg.body_ids to be resolved "
+            "from a body_names regex; no safe index fallback exists."
+        )
+    foot_forces = magnitude[:, sensor_cfg.body_ids]
     all_feet = (foot_forces > threshold).all(dim=1) & (~freefall)
-
-    # First-time transition: all_feet True AND support_reached still False.
-    first_time = all_feet & (~env._recovery_support_reached)
-    env._recovery_support_reached |= all_feet
-    return first_time.float()
+    return all_feet.float()
 
 
 
@@ -256,29 +285,30 @@ def recovery_support_state(
 def recovery_body_collision(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    force_clip: float = 100.0,
 ) -> torch.Tensor:
-    """Body collision penalty: sum of contact forces on thigh/calf/base.
+    """Body collision penalty on thigh / calf / base (paper Table I).
 
-    Paper: B = {shanks, thighs, base}, r = sum(||lambda_b||^2)
-    Scale = -5e-2. Only active during recovery phase (not free-fall).
+    r = CW · sum_b ( clip(||λ_b||, 0, force_clip)² )
+
+    The paper's formula is r = sum(||λ_b||²); we clip the per-body force
+    magnitude at `force_clip` Newtons before squaring so high-impact contacts
+    on reset (||F|| often >1000 N) do not produce ~1e6-magnitude spikes that
+    would drown the gradient early in training. Scale −5e-2 matches Table I.
     """
     if _is_freefall(env).all():
         return torch.zeros(env.num_envs, device=env.device)
+    if sensor_cfg.body_ids is None or sensor_cfg.body_ids == slice(None):
+        raise RuntimeError(
+            "recovery_body_collision requires sensor_cfg.body_ids to be resolved "
+            "from a body_names regex; no safe index fallback exists."
+        )
 
-    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    forces = contact_sensor.data.net_forces_w_history[:, 0, :, :]  # (N, num_bodies, 3)
-    force_sq = torch.sum(torch.square(forces), dim=-1)  # (N, num_bodies)
-
-    # Use body_ids from sensor_cfg if available
-    if sensor_cfg.body_ids is not None and sensor_cfg.body_ids != slice(None):
-        body_forces = force_sq[:, sensor_cfg.body_ids]
-    else:
-        # Fallback: base(0) + thigh(2,6,10,14) + calf(3,7,11,15)
-        body_idx = [0, 2, 3, 6, 7, 10, 11, 14, 15]
-        body_forces = force_sq[:, body_idx]
-
-    penalty = torch.sum(body_forces, dim=1)
-    penalty = penalty
+    sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = sensor.data.net_forces_w_history[:, 0, :, :]
+    magnitude = torch.norm(forces, dim=-1)[:, sensor_cfg.body_ids]
+    magnitude = torch.clamp(magnitude, max=force_clip)
+    penalty = torch.sum(torch.square(magnitude), dim=1)
     return _get_cw(env) * penalty
 
 
@@ -308,7 +338,8 @@ def recovery_joint_velocity(
     and fight the paper's wheel-leg synergy contribution.
     """
     asset: Articulation = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.joint_vel[:, :NUM_LEG_JOINTS]), dim=1)
+    leg_ids, _ = _get_joint_split(env, asset)
+    return torch.sum(torch.square(asset.data.joint_vel[:, leg_ids]), dim=1)
 
 
 def recovery_torques(
@@ -317,7 +348,8 @@ def recovery_torques(
 ) -> torch.Tensor:
     """sum(tau²) over LEG joints only (paper Table I)."""
     asset: Articulation = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.applied_torque[:, :NUM_LEG_JOINTS]), dim=1)
+    leg_ids, _ = _get_joint_split(env, asset)
+    return torch.sum(torch.square(asset.data.applied_torque[:, leg_ids]), dim=1)
 
 
 def recovery_joint_acceleration(
@@ -326,7 +358,8 @@ def recovery_joint_acceleration(
 ) -> torch.Tensor:
     """sum(q_ddot²) over LEG joints only (paper Table I)."""
     asset: Articulation = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.joint_acc[:, :NUM_LEG_JOINTS]), dim=1)
+    leg_ids, _ = _get_joint_split(env, asset)
+    return torch.sum(torch.square(asset.data.joint_acc[:, leg_ids]), dim=1)
 
 
 def recovery_wheel_velocity(
@@ -340,7 +373,8 @@ def recovery_wheel_velocity(
     torque). Late phase (ED→1): full penalty → converge to still stance.
     """
     asset: Articulation = env.scene[asset_cfg.name]
-    penalty = torch.sum(torch.square(asset.data.joint_vel[:, NUM_LEG_JOINTS:]), dim=1)
+    _, wheel_ids = _get_joint_split(env, asset)
+    penalty = torch.sum(torch.square(asset.data.joint_vel[:, wheel_ids]), dim=1)
     return _get_ed(env) * penalty
 
 
@@ -365,10 +399,11 @@ def recovery_wheel_leg_coord(
     with the task/ED convergence phase.
     """
     asset: Articulation = env.scene[asset_cfg.name]
+    _, wheel_ids = _get_joint_split(env, asset)
 
     early_gate = 1.0 - _get_ed(env)
 
-    wheel_speed = torch.sum(torch.abs(asset.data.joint_vel[:, NUM_LEG_JOINTS:]), dim=1)
+    wheel_speed = torch.sum(torch.abs(asset.data.joint_vel[:, wheel_ids]), dim=1)
     wheel_speed = torch.clamp(wheel_speed, max=max_wheel_speed) / max_wheel_speed
 
     tilt = torch.norm(asset.data.projected_gravity_b[:, :2], dim=1)
@@ -386,21 +421,19 @@ def reset_with_freefall(
     drop_height: float = 1.1,
     leg_joint_pos_noise: float = 0.3,
 ):
-    """Random orientation + 1.1m drop + diverse initial joint pose.
+    """Paper Section III-A reset: random orientation, 1.1 m drop, random
+    initial joint angles.
 
-    Paper Section III-A produces diverse fallen states via floppy-joint
-    free-fall. Isaac Lab has no clean per-env torque override, so we
-    reproduce the outcome (not the mechanism) by:
+    The paper's verbatim wording is "randomly initializing the robot's
+    base orientation and joint angles" — so both orientation and joint
+    pose are randomised at spawn. Combined with zero_action_freefall's
+    floppy-joint free-fall, the 2 s fall then produces the diverse fallen
+    states the recovery policy trains against.
 
-    1. Randomising root orientation uniformly on SO(3) and dropping from
-       `drop_height` metres.
-    2. Perturbing each leg joint by Uniform(-leg_joint_pos_noise,
-       +leg_joint_pos_noise) rad (wheels keep their default).
-
-    Combined with the 2s free-fall teleport (zero_action_freefall), this
-    still yields a broad fallen-state distribution without fighting the PD
-    controller mid-fall. Empirically matches the diversity the paper gets
-    from torques=0.
+    Args:
+      drop_height: spawn z in metres (paper: 1.1).
+      leg_joint_pos_noise: leg joint angle noise, Uniform(±noise) rad.
+        Wheels keep their default pose.
     """
     asset: Articulation = env.scene[asset_cfg.name]
     if len(env_ids) == 0:
@@ -422,15 +455,14 @@ def reset_with_freefall(
     asset.write_root_state_to_sim(root_state, env_ids)
 
     joint_pos = asset.data.default_joint_pos[env_ids].clone()
+    leg_ids, _ = _get_joint_split(env, asset)
     # Perturb only leg joints for pose diversity; wheels start at default.
-    noise = (torch.rand_like(joint_pos[:, :NUM_LEG_JOINTS]) * 2.0 - 1.0) * leg_joint_pos_noise
-    joint_pos[:, :NUM_LEG_JOINTS] = joint_pos[:, :NUM_LEG_JOINTS] + noise
+    noise = (torch.rand_like(joint_pos[:, leg_ids]) * 2.0 - 1.0) * leg_joint_pos_noise
+    joint_pos[:, leg_ids] = joint_pos[:, leg_ids] + noise
     asset.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
 
     _ensure_step_counter(env)
     env._recovery_step_count[env_ids] = 0
-    if hasattr(env, "_recovery_support_reached"):
-        env._recovery_support_reached[env_ids] = False
 
 
 # ── Success checker ──
@@ -478,55 +510,84 @@ def recovery_success_rate(
 
 # ── Free-fall Action Override ──
 
+def _cache_actuator_gains(env: ManagerBasedRLEnv, asset: Articulation) -> bool:
+    """Validate that each actuator exposes per-env (num_envs, num_joints)
+    stiffness/damping tensors we can mutate in-place. Caches originals and
+    returns True on success; returns False if the actuator class does not
+    meet the contract (caller must fall back to the teleport path).
+    """
+    if hasattr(env, "_recovery_actuator_gain_cache"):
+        return env._recovery_actuator_gain_cache is not None
+
+    actuators = getattr(asset, "actuators", None)
+    if not actuators:
+        env._recovery_actuator_gain_cache = None
+        return False
+
+    cache = {}
+    expected_shape = (env.num_envs,)
+    for name, actuator in actuators.items():
+        stiffness = getattr(actuator, "stiffness", None)
+        damping = getattr(actuator, "damping", None)
+        if not torch.is_tensor(stiffness) or not torch.is_tensor(damping):
+            env._recovery_actuator_gain_cache = None
+            return False
+        if stiffness.ndim != 2 or stiffness.shape[0] != env.num_envs:
+            env._recovery_actuator_gain_cache = None
+            return False
+        cache[name] = (stiffness.clone(), damping.clone())
+    env._recovery_actuator_gain_cache = cache
+    return True
+
+
 def zero_action_freefall(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ):
-    """Paper Section III-A: first 2s = true "torques = 0" on joints.
+    """Paper Section III-A: first 2 s of each episode = "joint torques zero".
 
-    Implementation:
-      - During free-fall (step < FREEFALL_STEPS): zero the PD gains of the
-        actuator(s) for those envs AND overwrite the processed position
-        target with the current joint position so any residual effort path
-        produces ~0 torque. Joints become floppy → legs swing freely as the
-        root falls, producing the diverse fallen-state distribution the
-        paper relies on.
-      - When an env exits free-fall: restore the original gains cached at
-        first call.
+    Primary path (preferred): zero each actuator's per-env stiffness and
+    damping tensors for envs still in free-fall and pin their PD position
+    target to the current joint_pos — the PD controller then produces ≈0
+    torque so joints are floppy and legs swing freely under gravity,
+    matching the paper's fallen-state distribution.
 
-    Gains (stiffness, damping) on Isaac Lab actuators are (num_envs,
-    num_joints) tensors, so per-env zeroing is supported natively. If the
-    actuator API does not expose them we fall back to the previous rigid-
-    at-default teleport (safe but less diverse).
+    Fallback path (rigid-at-default teleport): used if the actuator class
+    does not expose mutable (num_envs, num_joints) stiffness / damping
+    tensors (e.g. IdealPDActuator with scalar gains). Less diverse but
+    safe.
 
-    Called as an interval event every control step.
+    When an env leaves free-fall, the cached original gains are restored.
+
+    Called as an interval event every control step. If Isaac Lab passes a
+    specific `env_ids` subset, we restrict our action to that subset.
     """
-    if not hasattr(env, "_recovery_step_count"):
-        return
-
+    _ensure_step_counter(env)
     asset: Articulation = env.scene[asset_cfg.name]
-    freefall_mask = env._recovery_step_count < FREEFALL_STEPS
 
-    actuators = getattr(asset, "actuators", None)
-    gains_ok = bool(actuators) and all(
-        hasattr(a, "stiffness") and hasattr(a, "damping") for a in actuators.values()
-    )
+    freefall_mask = env._recovery_step_count < FREEFALL_STEPS
+    # Respect the event manager's env_ids subset if given.
+    if env_ids is not None and not isinstance(env_ids, slice):
+        subset_mask = torch.zeros_like(freefall_mask)
+        subset_mask[env_ids] = True
+        freefall_mask = freefall_mask & subset_mask
+
+    gains_ok = _cache_actuator_gains(env, asset)
 
     if gains_ok:
-        # Cache the original gains on first call (gains are leg joints + wheels).
-        if not hasattr(env, "_recovery_actuator_gain_cache"):
-            env._recovery_actuator_gain_cache = {
-                name: (a.stiffness.clone(), a.damping.clone())
-                for name, a in actuators.items()
-            }
-
         freefall_idx = torch.where(freefall_mask)[0]
-        running_idx = torch.where(~freefall_mask)[0]
+        # Running envs to restore: union of (subset, not-freefall). If env_ids
+        # given, restore only within that subset so we don't touch envs the
+        # manager did not request this tick.
+        if env_ids is not None and not isinstance(env_ids, slice):
+            running_mask = (~(env._recovery_step_count < FREEFALL_STEPS)) & subset_mask
+        else:
+            running_mask = ~(env._recovery_step_count < FREEFALL_STEPS)
+        running_idx = torch.where(running_mask)[0]
 
-        for name, actuator in actuators.items():
+        for name, actuator in asset.actuators.items():
             stiffness_ref, damping_ref = env._recovery_actuator_gain_cache[name]
-            # Zero for free-fall envs, restore original for running envs.
             if len(freefall_idx) > 0:
                 actuator.stiffness[freefall_idx] = 0.0
                 actuator.damping[freefall_idx] = 0.0
@@ -534,11 +595,9 @@ def zero_action_freefall(
                 actuator.stiffness[running_idx] = stiffness_ref[running_idx]
                 actuator.damping[running_idx] = damping_ref[running_idx]
 
-        # Also pin the PD target to current joint_pos so even if stiffness is
-        # non-zero on some actuator we still get near-zero torque.
         if len(freefall_idx) > 0:
             current_pos = asset.data.joint_pos[freefall_idx]
-            asset.set_joint_position_target(current_pos, joint_ids=None, env_ids=freefall_idx)
+            asset.set_joint_position_target(current_pos, env_ids=freefall_idx)
         return
 
     # Fallback: rigid-at-default teleport (previous implementation).
@@ -598,13 +657,14 @@ def priv_foot_contact(
     gets the exact ground-contact indicator, which is the strongest signal for
     whether the robot has reached the support state.
     """
+    if sensor_cfg.body_ids is None or sensor_cfg.body_ids == slice(None):
+        raise RuntimeError(
+            "priv_foot_contact requires sensor_cfg.body_ids to be resolved "
+            "from a body_names regex; no safe index fallback exists."
+        )
     sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     forces = sensor.data.net_forces_w_history[:, 0, :, :]
-    magnitude = torch.norm(forces, dim=-1)
-    if sensor_cfg.body_ids is not None and sensor_cfg.body_ids != slice(None):
-        magnitude = magnitude[:, sensor_cfg.body_ids]
-    else:
-        magnitude = magnitude[:, [4, 8, 12, 16]]
+    magnitude = torch.norm(forces, dim=-1)[:, sensor_cfg.body_ids]
     return (magnitude > threshold).float()
 
 
