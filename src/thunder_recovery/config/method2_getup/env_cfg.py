@@ -61,7 +61,7 @@ from isaaclab.utils import configclass
 import isaaclab.envs.mdp as mdp_core
 
 from thunder_recovery import mdp as recovery_mdp
-from thunder_recovery.config.recovery_env_cfg import (
+from thunder_recovery.config.method1_deng.env_cfg import (
     BASE_LINK_NAME,
     ThunderRecoveryEnvCfg,
 )

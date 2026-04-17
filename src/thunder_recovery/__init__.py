@@ -30,7 +30,7 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": "thunder_recovery.config.recovery_env_cfg:ThunderRecoveryEnvCfg",
+        "env_cfg_entry_point": "thunder_recovery.config.method1_deng.env_cfg:ThunderRecoveryEnvCfg",
         "rsl_rl_cfg_entry_point": "thunder_recovery.config.recovery_ppo_cfg:RecoveryPPORunnerCfg",
     },
 )
@@ -40,7 +40,7 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": "thunder_recovery.config.recovery_env_cfg_getup:ThunderRecoveryGetupEnvCfg",
+        "env_cfg_entry_point": "thunder_recovery.config.method2_getup.env_cfg:ThunderRecoveryGetupEnvCfg",
         "rsl_rl_cfg_entry_point": "thunder_recovery.config.recovery_ppo_cfg:RecoveryPPORunnerCfg",
     },
 )

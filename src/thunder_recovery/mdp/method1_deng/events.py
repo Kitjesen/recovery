@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 
-from ._utils import FREEFALL_STEPS, _ensure_step_counter, _get_joint_split
+from .._utils import FREEFALL_STEPS, _ensure_step_counter, _get_joint_split
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv

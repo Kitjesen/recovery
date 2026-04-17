@@ -43,7 +43,7 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 
-from ._utils import (
+from .._utils import (
     _advance_step_counter,
     _env_dt,
     _ensure_step_counter,

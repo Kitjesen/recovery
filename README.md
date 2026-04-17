@@ -107,16 +107,23 @@ recovery/
 │       └── meshes/*.STL
 ├── src/
 │   └── thunder_recovery/
-│       ├── __init__.py                 # gym.register on import
+│       ├── __init__.py                       # gym.register (2 tasks) on import
 │       ├── config/
-│       │   ├── asset.py                # THUNDER_NOHEAD_CFG
-│       │   ├── recovery_env_cfg.py     # ThunderRecoveryEnvCfg
-│       │   └── recovery_ppo_cfg.py
+│       │   ├── asset.py                      # THUNDER_NOHEAD_CFG (shared)
+│       │   ├── recovery_ppo_cfg.py           # PPO runner cfg (shared)
+│       │   ├── method1_deng/
+│       │   │   └── env_cfg.py                # ThunderRecoveryEnvCfg
+│       │   └── method2_getup/
+│       │       └── env_cfg.py                # ThunderRecoveryGetupEnvCfg
 │       └── mdp/
-│           ├── _utils.py               # ED / CW / step counter / dt
-│           ├── events.py               # reset_with_freefall, zero_action_freefall
-│           ├── observations.py         # priv_*
-│           └── rewards.py              # 13 reward terms
+│           ├── _utils.py                     # ED / CW / step counter / dt
+│           ├── observations.py               # priv_* (shared)
+│           ├── method1_deng/
+│           │   ├── events.py                 # reset_with_freefall, zero_action_freefall
+│           │   └── rewards.py                # Deng et al. 13 ED/CW-shaped rewards
+│           └── method2_getup/
+│               ├── events.py                 # reset_getup (60/40 drop)
+│               └── rewards.py                # mujoco_playground 9 gated-exp rewards
 └── scripts/
     ├── cli_args.py
     ├── train.py
