@@ -4,9 +4,11 @@
 """Recovery MDP package.
 
 Public re-exports split by Isaac Lab convention:
-  events.py        — reset / free-fall torque override
-  observations.py  — privileged critic-only observations
-  rewards.py       — reward functions + paper success metric
+  events.py         — Method 1 reset / free-fall torque override
+  events_getup.py   — Method 2 reset (mujoco_playground 60/40 drop)
+  observations.py   — privileged critic-only observations
+  rewards.py        — Method 1 rewards (Deng et al., ED/CW) + success metric
+  rewards_getup.py  — Method 2 rewards (mujoco_playground gated exp)
 
 Private helpers (ED, CW, step counter, joint split, dt) live in _utils.py
 and are re-exported only for advanced users.
@@ -20,6 +22,10 @@ from ._utils import (
 from .events import (
     reset_with_freefall,
     zero_action_freefall,
+)
+
+from .events_getup import (
+    reset_getup,
 )
 
 from .observations import (
@@ -54,6 +60,18 @@ from .rewards import (
     recovery_wheel_velocity,
 )
 
+from .rewards_getup import (
+    getup_action_rate,
+    getup_dof_acc,
+    getup_dof_pos_limits,
+    getup_dof_vel,
+    getup_orientation,
+    getup_posture,
+    getup_stand_still,
+    getup_torques,
+    getup_torso_height,
+)
+
 __all__ = [
     # Constants
     "FREEFALL_STEPS",
@@ -61,6 +79,7 @@ __all__ = [
     # Events
     "reset_with_freefall",
     "zero_action_freefall",
+    "reset_getup",
     # Actor observations (paper 78-dim spec)
     "joint_pos_legs",
     "joint_vel_legs",
@@ -74,7 +93,7 @@ __all__ = [
     "priv_base_lin_vel_clean",
     "priv_body_contact_force",
     "priv_foot_contact",
-    # Rewards
+    # Method 1 rewards (Deng et al., ED/CW shaping)
     "check_recovery_success",
     "recovery_action_rate_legs",
     "recovery_base_height",
@@ -90,4 +109,14 @@ __all__ = [
     "recovery_wheel_leg_coord",
     "recovery_joint_deviation",
     "recovery_wheel_velocity",
+    # Method 2 rewards (mujoco_playground getup)
+    "getup_action_rate",
+    "getup_dof_acc",
+    "getup_dof_pos_limits",
+    "getup_dof_vel",
+    "getup_orientation",
+    "getup_posture",
+    "getup_stand_still",
+    "getup_torques",
+    "getup_torso_height",
 ]
