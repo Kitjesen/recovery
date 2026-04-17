@@ -23,11 +23,17 @@ from .events import (
 )
 
 from .observations import (
+    joint_pos_legs,
+    joint_vel_legs,
+    previous_joint_pos_legs,
+    previous_joint_vel_legs,
+    previous_wheel_vel,
     priv_base_ang_vel_clean,
     priv_base_height,
     priv_base_lin_vel_clean,
     priv_body_contact_force,
     priv_foot_contact,
+    wheel_vel,
 )
 
 from .rewards import (
@@ -54,6 +60,13 @@ __all__ = [
     # Events
     "reset_with_freefall",
     "zero_action_freefall",
+    # Actor observations (paper 78-dim spec)
+    "joint_pos_legs",
+    "joint_vel_legs",
+    "previous_joint_pos_legs",
+    "previous_joint_vel_legs",
+    "previous_wheel_vel",
+    "wheel_vel",
     # Privileged observations
     "priv_base_ang_vel_clean",
     "priv_base_height",

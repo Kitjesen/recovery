@@ -1,13 +1,34 @@
 # Copyright (c) 2026 Qiongpei Technology
 # SPDX-License-Identifier: Apache-2.0
 
-"""Privileged observation functions for the critic (paper Fig. 3
-asymmetric actor-critic).
+"""Observation functions for the recovery MDP.
 
-The actor uses onboard-realistic, noise-injected observations inherited
-from `ThunderHistRoughEnvCfg`. The critic gets the same stack plus the
-five signals below — all instantaneous (history_length=0), all
-sim-ground-truth, all invisible to the robot's on-robot sensors.
+Two groups:
+
+- Actor (`joint_pos_legs`, `joint_vel_legs`, `wheel_vel`, `previous_*`)
+  — deployment-realistic observations matching the 78-dim spec inferred
+  from the author's public checkpoint-loading code
+  (`boyuandeng/Recovery_go2w/simulate_python/test/runtest.py`):
+
+        pre_actions              16
+        projected_gravity         3
+        ang_vel                   3   (no linear velocity!)
+        joint_pos_legs           12
+        joint_vel_legs           12
+        wheel_vel                 4
+        previous_joint_pos_legs  12
+        previous_joint_vel_legs  12
+        previous_wheel_vel        4
+                                ──
+                                78
+
+  The `previous_*` terms cache the t-1 values in per-env buffers attached
+  to the env — the caches are reset in `reset_with_freefall` so the first
+  post-reset step observes the fresh fallen pose, not the last frame of
+  the previous episode.
+
+- Critic (`priv_*`) — the actor's 78-dim obs plus 5 privileged signals,
+  all instantaneous (history_length=0) and sim-ground-truth.
 """
 
 from __future__ import annotations
@@ -19,8 +40,85 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 
+from ._utils import _get_joint_split
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+
+
+# ── Actor (paper 78-dim spec) ──
+
+
+def joint_pos_legs(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Leg joint positions, shape (N, 12). Wheels excluded — paper's
+    `dof_pos` is legs-only."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    leg_ids, _ = _get_joint_split(env, asset)
+    return asset.data.joint_pos[:, leg_ids]
+
+
+def joint_vel_legs(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Leg joint velocities, shape (N, 12)."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    leg_ids, _ = _get_joint_split(env, asset)
+    return asset.data.joint_vel[:, leg_ids]
+
+
+def wheel_vel(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Wheel velocities, shape (N, 4). Paper separates wheel speeds from
+    leg dof_vel; no wheel position is observed."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    _, wheel_ids = _get_joint_split(env, asset)
+    return asset.data.joint_vel[:, wheel_ids]
+
+
+def _cache_prev(env: ManagerBasedRLEnv, key: str, current: torch.Tensor) -> torch.Tensor:
+    """Return the cached `_recovery_prev_<key>` value, then overwrite it
+    with `current` for the next step. On the first call we initialise the
+    cache to `current` so the first-step previous equals current (a noop
+    signal — nothing more we can do without a past)."""
+    attr = f"_recovery_prev_{key}"
+    if not hasattr(env, attr):
+        setattr(env, attr, current.clone())
+    prev = getattr(env, attr).clone()
+    setattr(env, attr, current.clone())
+    return prev
+
+
+def previous_joint_pos_legs(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Paper's `previous_joint_dof` (legs) — t-1 leg positions (N, 12)."""
+    return _cache_prev(env, "joint_pos_legs", joint_pos_legs(env, asset_cfg))
+
+
+def previous_joint_vel_legs(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Paper's `previous_joint_vel` (legs) — t-1 leg velocities (N, 12)."""
+    return _cache_prev(env, "joint_vel_legs", joint_vel_legs(env, asset_cfg))
+
+
+def previous_wheel_vel(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Paper's `previous_wheel_vel` — t-1 wheel speeds (N, 4)."""
+    return _cache_prev(env, "wheel_vel", wheel_vel(env, asset_cfg))
+
+
+# ── Critic (privileged) ──
 
 
 def priv_base_height(
@@ -42,8 +140,8 @@ def priv_base_lin_vel_clean(
 ) -> torch.Tensor:
     """Ground-truth body-frame linear velocity, shape (N, 3).
 
-    The policy's `base_lin_vel` has Unoise injected to emulate IMU drift;
-    the critic gets the clean sim value here.
+    The actor has no `base_lin_vel` at all (IMU integration drift is too
+    severe for recovery); the critic gets the clean sim value.
     """
     asset: Articulation = env.scene[asset_cfg.name]
     return asset.data.root_lin_vel_b
@@ -53,7 +151,10 @@ def priv_base_ang_vel_clean(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Ground-truth body-frame angular velocity, shape (N, 3)."""
+    """Ground-truth body-frame angular velocity, shape (N, 3).
+
+    Actor's `base_ang_vel` is noise-injected; critic sees the clean value.
+    """
     asset: Articulation = env.scene[asset_cfg.name]
     return asset.data.root_ang_vel_b
 

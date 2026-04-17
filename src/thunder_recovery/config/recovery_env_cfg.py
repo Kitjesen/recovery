@@ -140,53 +140,92 @@ class RecoveryActionsCfg:
 # -- Observations -------------------------------------------------------
 @configclass
 class RecoveryObservationsCfg:
-    """Asymmetric actor-critic observations (paper Fig. 3).
+    """Paper-faithful 78-dim actor + asymmetric 103-dim critic.
 
-    Actor  : base_lin_vel (IMU noise) + base_ang_vel + proj_grav +
-             joint_pos + joint_vel + last_action, 10-frame history.
-    Critic : clean actor-side + priv_base_lin_vel_clean + priv_base_ang_vel_clean +
-             priv_base_height + priv_foot_contact + priv_body_contact_force
-             (history_length=0 for priv — instantaneous signals).
+    Layout inferred from the author's public checkpoint-loading code
+    `boyuandeng/Recovery_go2w/simulate_python/test/runtest.py` — the
+    Actor class whose state_dict matches `model_7999.pt`:
+
+      Actor (78):
+        pre_actions              16
+        projected_gravity         3
+        base_ang_vel              3   (no linear velocity!)
+        joint_pos_legs           12
+        joint_vel_legs           12
+        wheel_vel                 4
+        previous_joint_pos_legs  12
+        previous_joint_vel_legs  12
+        previous_wheel_vel        4
+
+      Critic (≈98–103):
+        78-dim actor stack (clean) + priv_base_lin_vel_clean (3) +
+        priv_base_ang_vel_clean (3) + priv_base_height (1) +
+        priv_foot_contact (4) + priv_body_contact_force (≈9) +
+        height_scan (≈160 for a 1.6 m × 1.0 m @ 0.1 m grid — kept for
+        terrain transfer, zeroed on flat plane).
+
+    history_length=1 on both groups: the paper handles "history" by
+    manually concatenating the `previous_*` frame, not via a stacking
+    window.
     """
 
     @configclass
     class PolicyCfg(ObsGroup):
-        base_lin_vel = ObsTerm(
-            func=mdp_core.base_lin_vel,
-            noise=Unoise(n_min=-0.1, n_max=0.1),
+        pre_actions = ObsTerm(
+            func=mdp_core.last_action,
             clip=(-100.0, 100.0),
-            history_length=10,
-        )
-        base_ang_vel = ObsTerm(
-            func=mdp_core.base_ang_vel,
-            noise=Unoise(n_min=-0.2, n_max=0.2),
-            clip=(-100.0, 100.0),
-            history_length=10,
+            history_length=1,
         )
         projected_gravity = ObsTerm(
             func=mdp_core.projected_gravity,
             noise=Unoise(n_min=-0.05, n_max=0.05),
             clip=(-100.0, 100.0),
-            history_length=10,
+            history_length=1,
         )
-        joint_pos = ObsTerm(
-            func=mdp_core.joint_pos_rel,
-            params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*", preserve_order=True)},
+        base_ang_vel = ObsTerm(
+            func=mdp_core.base_ang_vel,
+            noise=Unoise(n_min=-0.2, n_max=0.2),
+            clip=(-100.0, 100.0),
+            history_length=1,
+        )
+        joint_pos_legs = ObsTerm(
+            func=recovery_mdp.joint_pos_legs,
+            params={"asset_cfg": SceneEntityCfg("robot")},
             noise=Unoise(n_min=-0.01, n_max=0.01),
             clip=(-100.0, 100.0),
-            history_length=10,
+            history_length=1,
         )
-        joint_vel = ObsTerm(
-            func=mdp_core.joint_vel_rel,
-            params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*", preserve_order=True)},
+        joint_vel_legs = ObsTerm(
+            func=recovery_mdp.joint_vel_legs,
+            params={"asset_cfg": SceneEntityCfg("robot")},
             noise=Unoise(n_min=-1.5, n_max=1.5),
             clip=(-100.0, 100.0),
-            history_length=10,
+            history_length=1,
         )
-        actions = ObsTerm(
-            func=mdp_core.last_action,
+        wheel_vel = ObsTerm(
+            func=recovery_mdp.wheel_vel,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            noise=Unoise(n_min=-1.5, n_max=1.5),
             clip=(-100.0, 100.0),
-            history_length=10,
+            history_length=1,
+        )
+        previous_joint_pos_legs = ObsTerm(
+            func=recovery_mdp.previous_joint_pos_legs,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-100.0, 100.0),
+            history_length=1,
+        )
+        previous_joint_vel_legs = ObsTerm(
+            func=recovery_mdp.previous_joint_vel_legs,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-100.0, 100.0),
+            history_length=1,
+        )
+        previous_wheel_vel = ObsTerm(
+            func=recovery_mdp.previous_wheel_vel,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-100.0, 100.0),
+            history_length=1,
         )
 
         def __post_init__(self):
@@ -195,22 +234,46 @@ class RecoveryObservationsCfg:
 
     @configclass
     class CriticCfg(ObsGroup):
-        # Clean actor-style obs (no noise)
-        base_ang_vel = ObsTerm(func=mdp_core.base_ang_vel, clip=(-100.0, 100.0), history_length=10)
-        projected_gravity = ObsTerm(func=mdp_core.projected_gravity, clip=(-100.0, 100.0), history_length=10)
-        joint_pos = ObsTerm(
-            func=mdp_core.joint_pos_rel,
-            params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*", preserve_order=True)},
+        # Mirror the actor spec without IMU noise.
+        pre_actions = ObsTerm(func=mdp_core.last_action, clip=(-100.0, 100.0), history_length=1)
+        projected_gravity = ObsTerm(func=mdp_core.projected_gravity, clip=(-100.0, 100.0), history_length=1)
+        base_ang_vel = ObsTerm(func=mdp_core.base_ang_vel, clip=(-100.0, 100.0), history_length=1)
+        joint_pos_legs = ObsTerm(
+            func=recovery_mdp.joint_pos_legs,
+            params={"asset_cfg": SceneEntityCfg("robot")},
             clip=(-100.0, 100.0),
-            history_length=10,
+            history_length=1,
         )
-        joint_vel = ObsTerm(
-            func=mdp_core.joint_vel_rel,
-            params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*", preserve_order=True)},
+        joint_vel_legs = ObsTerm(
+            func=recovery_mdp.joint_vel_legs,
+            params={"asset_cfg": SceneEntityCfg("robot")},
             clip=(-100.0, 100.0),
-            history_length=10,
+            history_length=1,
         )
-        actions = ObsTerm(func=mdp_core.last_action, clip=(-100.0, 100.0), history_length=10)
+        wheel_vel = ObsTerm(
+            func=recovery_mdp.wheel_vel,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-100.0, 100.0),
+            history_length=1,
+        )
+        previous_joint_pos_legs = ObsTerm(
+            func=recovery_mdp.previous_joint_pos_legs,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-100.0, 100.0),
+            history_length=1,
+        )
+        previous_joint_vel_legs = ObsTerm(
+            func=recovery_mdp.previous_joint_vel_legs,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-100.0, 100.0),
+            history_length=1,
+        )
+        previous_wheel_vel = ObsTerm(
+            func=recovery_mdp.previous_wheel_vel,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            clip=(-100.0, 100.0),
+            history_length=1,
+        )
 
         # Privileged (instant, sim-ground-truth — not observable by onboard sensors)
         priv_base_lin_vel = ObsTerm(
@@ -249,9 +312,9 @@ class RecoveryObservationsCfg:
         )
 
         # Ground-truth height scan below the base (critic only).
-        # actor is deployment-realistic and has no access to this signal;
-        # giving it to the critic stabilises value estimation — matches the
-        # asymmetric actor-critic design in the paper's Fig. 3.
+        # Flat on a plane but wired in so extending to rough terrain is a
+        # one-line terrain swap — matches the asymmetric AC design in the
+        # paper's Fig. 3.
         height_scan = ObsTerm(
             func=mdp_core.height_scan,
             params={"sensor_cfg": SceneEntityCfg("height_scanner")},

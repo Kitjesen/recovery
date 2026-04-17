@@ -101,6 +101,22 @@ def reset_with_freefall(
         if torch.is_tensor(prev_action):
             prev_action[env_ids] = 0.0
 
+    # Reset the `previous_*` observation caches for these envs so the
+    # first post-reset step's "previous" frame is the fresh fallen pose
+    # rather than the last step of the previous episode.
+    _, wheel_ids = _get_joint_split(env, asset)
+    leg_pos_now = asset.data.joint_pos[env_ids][:, leg_ids]
+    leg_vel_now = asset.data.joint_vel[env_ids][:, leg_ids]
+    wheel_vel_now = asset.data.joint_vel[env_ids][:, wheel_ids]
+    for key, current in (
+        ("joint_pos_legs", leg_pos_now),
+        ("joint_vel_legs", leg_vel_now),
+        ("wheel_vel", wheel_vel_now),
+    ):
+        attr = f"_recovery_prev_{key}"
+        if hasattr(env, attr):
+            getattr(env, attr)[env_ids] = current
+
 
 # ── Free-fall torque override ──
 

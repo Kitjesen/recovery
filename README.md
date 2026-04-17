@@ -52,7 +52,7 @@ python scripts/train.py \
 ```
 
 Expected output within ~30 s:
-- `Actor MLP in=570, Critic MLP in=560` (asymmetric actor-critic)
+- `Actor MLP in=78, Critic MLP in≈262` (asymmetric actor-critic)
 - 13 `Episode_Reward/recovery_*` terms in the log
 - `recovery_support_state > 0` by iteration 2 (some envs already 4-foot
   grounded thanks to diverse reset init)
@@ -145,20 +145,59 @@ section E and the wheel-leg coordination contribution.
 | `recovery_success_rate` | 1e-6 | — | logging only | end-of-episode success flag |
 | `recovery_step_counter` | 1e-6 | — | side-effect | advances per-env ED step counter |
 
+## Network architecture
+
+`ActorCritic` (rsl_rl) with separate MLPs sized per the author's public
+checkpoint (`Recovery_go2w/.../test/runtest.py` — the class whose
+`state_dict` loads `model_7999.pt` must match the training-time network
+exactly):
+
+```
+Actor  : MLP [128, 128, 128] ReLU,   78 → 16
+Critic : MLP [128, 128, 128] ReLU,  ~262 →  1
+std    : learned scalar per action dim, init 1.0
+```
+
+Asymmetry is on the observation side only; both networks have identical
+width/depth.
+
 ## Observations (asymmetric actor-critic)
 
-**Actor** (570-dim, noisy; 10-frame history):
-- `base_lin_vel` (3 x 10) with Unoise +-0.1
-- `base_ang_vel` (3 x 10) with Unoise +-0.2
-- `projected_gravity` (3 x 10) with Unoise +-0.05
-- `joint_pos_rel` (16 x 10) with Unoise +-0.01
-- `joint_vel_rel` (16 x 10) with Unoise +-1.5
-- `last_action` (16 x 10)
+**Actor — paper's 78-dim spec** (`history_length=1` on all terms — the
+paper handles "history" via manually concatenated `previous_*` fields,
+not via a stacking window):
 
-**Critic** (560-dim, clean + privileged):
-- Clean actor-side obs minus the IMU-noisy `base_lin_vel` (540-dim, 10-frame)
-- `priv_base_lin_vel_clean` (3), `priv_base_ang_vel_clean` (3)
-- `priv_base_height` (1), `priv_foot_contact` (4), `priv_body_contact_force` (9)
+| Term | Dim | Source |
+| --- | ---: | --- |
+| `pre_actions` | 16 | `mdp.last_action` |
+| `projected_gravity` | 3 | `mdp.projected_gravity`, Unoise ±0.05 |
+| `base_ang_vel` | 3 | `mdp.base_ang_vel`, Unoise ±0.2 |
+| `joint_pos_legs` | 12 | `recovery_mdp.joint_pos_legs` |
+| `joint_vel_legs` | 12 | `recovery_mdp.joint_vel_legs` |
+| `wheel_vel` | 4 | `recovery_mdp.wheel_vel` |
+| `previous_joint_pos_legs` | 12 | `recovery_mdp.previous_joint_pos_legs` (cached t-1) |
+| `previous_joint_vel_legs` | 12 | `recovery_mdp.previous_joint_vel_legs` (cached t-1) |
+| `previous_wheel_vel` | 4 | `recovery_mdp.previous_wheel_vel` (cached t-1) |
+| **Total** | **78** | |
+
+No `base_lin_vel` — paper does not observe it (IMU integration drift is
+too severe for recovery).
+
+**Critic — actor spec (clean) + privileged signals**:
+
+| Term | Dim | What / why |
+| --- | ---: | --- |
+| …same 9 actor terms (no noise) | 78 | clean mirror of actor stack |
+| `priv_base_lin_vel_clean` | 3 | ground-truth body-frame lin vel |
+| `priv_base_ang_vel_clean` | 3 | ground-truth body-frame ang vel |
+| `priv_base_height` | 1 | `root_pos_w[:, 2]`, invisible to encoders |
+| `priv_foot_contact` | 4 | binary per-foot contact |
+| `priv_body_contact_force` | ≈ 9 | contact mag on base + thighs + calves |
+| `height_scan` | ≈ 160 | flat plane now, wired for future rough-terrain transfer |
+| **Total** | **≈ 262** | |
+
+`previous_*` caches live on `env._recovery_prev_*` buffers and are
+explicitly reset to the fresh fallen pose in `reset_with_freefall`.
 
 ## Success criteria (paper-equivalent)
 
