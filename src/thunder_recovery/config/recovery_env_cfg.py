@@ -195,7 +195,8 @@ class RecoveryObservationsCfg:
 
     @configclass
     class CriticCfg(ObsGroup):
-        # Clean actor-style obs (no noise)
+        # Clean actor-style obs (no noise) — must be superset of actor obs
+        base_lin_vel = ObsTerm(func=mdp_core.base_lin_vel, clip=(-100.0, 100.0), history_length=10)
         base_ang_vel = ObsTerm(func=mdp_core.base_ang_vel, clip=(-100.0, 100.0), history_length=10)
         projected_gravity = ObsTerm(func=mdp_core.projected_gravity, clip=(-100.0, 100.0), history_length=10)
         joint_pos = ObsTerm(
