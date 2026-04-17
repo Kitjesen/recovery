@@ -124,14 +124,25 @@ def recovery_base_orientation(
 def recovery_support_state(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     threshold: float = 1.0,
+    min_base_height: float = 0.30,
 ) -> torch.Tensor:
-    """Paper verbatim: "a reward for the support state, defined as the
-    condition where all four wheels are in contact with the ground
-    simultaneously." State-conditional (not event-triggered).
+    """Support state — 4 feet contact AND base held above the ground.
 
-    Returns 1.0 while all four feet contact the ground, 0 otherwise.
-    Suppressed during free-fall (signal is meaningless while falling).
+    Paper text only required "all four wheels in contact". On a wheeled-
+    legged robot that condition is satisfied by a belly-flat pose with
+    wheels grounded (hip/thigh/calf fully folded), which turned out to
+    be a strong local optimum during training: policy collected the
+    support reward by staying down rather than standing up.
+
+    Adding a `min_base_height` gate (default 0.30 m, matches success
+    criteria) means the policy only earns the reward while actually
+    holding the body up. Empirically: without the gate the robot at
+    iter ~500 ends up with base_height ~0.16 m and support_state ~0.69
+    (collected by lying flat with 4 wheels touching).
+
+    Suppressed during free-fall.
     """
     freefall = _is_freefall(env)
     if sensor_cfg.body_ids is None or sensor_cfg.body_ids == slice(None):
@@ -142,8 +153,12 @@ def recovery_support_state(
     sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     forces = sensor.data.net_forces_w_history[:, 0, :, :]
     magnitude = torch.norm(forces, dim=-1)[:, sensor_cfg.body_ids]
-    all_feet = (magnitude > threshold).all(dim=1) & (~freefall)
-    return all_feet.float()
+    all_feet = (magnitude > threshold).all(dim=1)
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    base_up = asset.data.root_pos_w[:, 2] > min_base_height
+
+    return (all_feet & base_up & ~freefall).float()
 
 
 # ── Behavior rewards (× CW) ──

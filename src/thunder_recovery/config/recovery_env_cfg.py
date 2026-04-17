@@ -419,11 +419,20 @@ class RecoveryRewardsCfg:
         weight=-1e-2,
     )
 
-    # Support state (paper Section E, per-step binary)
+    # Support state — 4 feet contact AND base held above min_base_height.
+    # The height gate is critical for wheeled-legged robots: without it the
+    # policy converges to belly-flat with wheels grounded to collect this
+    # reward without standing up. 0.30 m matches the success criteria,
+    # so earning support_state now requires visible progress toward success.
     recovery_support_state = RewTerm(
         func=recovery_mdp.recovery_support_state,
         weight=5.0,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=FOOT_LINK_REGEX), "threshold": 1.0},
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FOOT_LINK_REGEX),
+            "asset_cfg": SceneEntityCfg("robot"),
+            "threshold": 1.0,
+            "min_base_height": 0.30,
+        },
     )
 
     # Wheel-leg coordination (paper core contribution, early-phase only)
