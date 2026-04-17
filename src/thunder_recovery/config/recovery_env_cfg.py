@@ -405,10 +405,13 @@ class RecoveryRewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
-    # Behavior rewards (xCW, paper Table I)
+    # Behavior rewards (xCW, paper Table I) — weights reduced 5x from paper
+    # default so the policy is not discouraged from the large motions
+    # needed to actually stand up. Paper weights were tuned on KYON and
+    # over-penalise Thunder's joint dynamics.
     recovery_body_collision = RewTerm(
         func=recovery_mdp.recovery_body_collision,
-        weight=-5e-2,
+        weight=-1e-2,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=COLLISION_BODY_REGEXES),
             "force_clip": 50.0,
@@ -416,7 +419,7 @@ class RecoveryRewardsCfg:
     )
     recovery_action_rate_legs = RewTerm(
         func=recovery_mdp.recovery_action_rate_legs,
-        weight=-1e-2,
+        weight=-2e-3,
     )
 
     # Support state — 4 feet contact AND base held above min_base_height.
@@ -449,29 +452,35 @@ class RecoveryRewardsCfg:
     # Free-fall steps are masked (stiffness=0, joints uncontrollable).
     recovery_joint_deviation = RewTerm(
         func=recovery_mdp.recovery_joint_deviation,
-        weight=-0.01,
+        weight=-2e-3,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
-    # Constant penalties (paper Table I)
+    # Constant penalties — weights reduced from paper default so the
+    # policy is not punished for the large-amplitude motions required
+    # to stand up. At paper's -2e-2, `recovery_joint_velocity` reached
+    # -1.0/episode at iter 300 (single biggest term), driving the policy
+    # toward a low-motion local optimum. Reducing these lets the robot
+    # "move freely" to stand; success criteria still require max|q_dot|
+    # < 0.1 rad/s in the last 1 s so convergence is not lost.
     recovery_joint_velocity = RewTerm(
         func=recovery_mdp.recovery_joint_velocity,
-        weight=-2e-2,
+        weight=-3e-3,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_torques = RewTerm(
         func=recovery_mdp.recovery_torques,
-        weight=-2.5e-5,
+        weight=-5e-6,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_joint_acceleration = RewTerm(
         func=recovery_mdp.recovery_joint_acceleration,
-        weight=-2.5e-7,
+        weight=-5e-8,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     recovery_wheel_velocity = RewTerm(
         func=recovery_mdp.recovery_wheel_velocity,
-        weight=-2e-2,
+        weight=-3e-3,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
