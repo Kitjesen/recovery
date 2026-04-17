@@ -50,6 +50,7 @@ from .rewards import (
     recovery_support_state,
     recovery_torques,
     recovery_wheel_leg_coord,
+    recovery_joint_deviation,
     recovery_wheel_velocity,
 )
 
@@ -87,5 +88,6 @@ __all__ = [
     "recovery_support_state",
     "recovery_torques",
     "recovery_wheel_leg_coord",
+    "recovery_joint_deviation",
     "recovery_wheel_velocity",
 ]

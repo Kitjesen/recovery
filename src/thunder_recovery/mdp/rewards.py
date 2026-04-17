@@ -240,6 +240,33 @@ def recovery_wheel_velocity(
 
 # ── Wheel-leg coordination (paper core contribution) ──
 
+
+def recovery_joint_deviation(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Post-freefall L2 joint deviation from default pose (constant penalty).
+
+    Unlike recovery_stand_joint_pos (x ED, only active late in the episode),
+    this penalty is always on after free-fall ends, giving the policy a
+    persistent gradient signal to move leg joints toward the standing pose.
+
+    Free-fall steps are masked: stiffness is zero so the policy cannot
+    control joints and penalising deviation would only bias the value
+    baseline without producing useful gradients.
+
+    raw = sum((q_leg - q_default_leg)^2)  (only leg joints, not wheels)
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    leg_ids, _ = _get_joint_split(env, asset)
+    deviation = torch.sum(
+        torch.square(asset.data.joint_pos[:, leg_ids] - asset.data.default_joint_pos[:, leg_ids]),
+        dim=1,
+    )
+    freefall = _is_freefall(env)
+    return deviation * (~freefall).float()
+
+
 def recovery_wheel_leg_coord(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
